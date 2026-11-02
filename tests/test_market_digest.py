@@ -283,6 +283,13 @@ def test_prompt_v2_rules_new_companies_and_grade_mix():
     assert "grade mix" in system
 
 
+def test_prompt_v3_explains_volume_baseline_and_sources():
+    system = build_market_digest_messages(facts_json="{}")[0]["content"]
+    assert "avg_4w_vacancies" in system
+    assert "with_salary_share" in system
+    assert "sources" in system
+
+
 def test_small_salary_group_has_no_median(pg_db):
     rows = [
         _vac(WEEK, detected_grade="lead", detected_salary_avg_rub=300_000.0) for _ in range(svc.MIN_SALARY_GROUP - 1)

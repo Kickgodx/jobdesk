@@ -209,10 +209,16 @@ def _trend(session: Session, query: VacancyQuery) -> list[dict[str, Any]]:
             query,
         )
     ).all()
-    return [
-        {"month": m.strftime("%Y-%m"), "vacancies": int(n), "with_salary": int(ns), "median": _r(med) if ns else None}
-        for m, n, ns, med in reversed(rows)
-    ]
+    current = datetime.now(UTC).strftime("%Y-%m")
+    out = []
+    for m, n, ns, med in reversed(rows):
+        month = m.strftime("%Y-%m")
+        item = {"month": month, "vacancies": int(n), "with_salary": int(ns), "median": _r(med) if ns else None}
+        if month == current:
+            # Месяц не закончился: число вакансий в нём нельзя сравнивать с полными месяцами.
+            item["partial"] = True
+        out.append(item)
+    return out
 
 
 def _companies(session: Session, query: VacancyQuery) -> list[dict[str, Any]]:

@@ -166,6 +166,10 @@ def test_match_prompt_and_parse():
     assert "Python, FastAPI" in messages[1]["content"]
     assert "<VACANCY>" in messages[1]["content"]
     assert "Нужен Python-разработчик" in messages[1]["content"]
+    # Все текстовые поля — по-русски; футер Telegram-канала — не требования.
+    assert "evidence, strengths, risks, explanation: Russian" in messages[0]["content"]
+    assert "channel footers" in messages[0]["content"]
+    assert "canonical Latin spelling everywhere" in messages[0]["content"]  # «питон» → Python в skill
 
     m = _parse_match(
         '{"confidence": 91,'

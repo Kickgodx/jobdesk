@@ -485,5 +485,90 @@
       "https://example.com/ml"
     ],
     "confidence": 0.9
+  },
+  "agency-for-named-client": {
+    "is_job_post": true,
+    "detected_specializations": [
+      "Backend"
+    ],
+    "detected_grade": "middle",
+    "salary_min": 300000,
+    "salary_max": 350000,
+    "salary_currency": "RUB",
+    "work_format": "office",
+    "city": "Москва",
+    "company": "NordBank",
+    "contact": "@talenthub_anna",
+    "employment_type": "full-time",
+    "technologies": [
+      "Java",
+      "Spring",
+      "PostgreSQL",
+      "Kafka"
+    ],
+    "confidence": 0.9
+  },
+  "unnamed-company-channel-footer": {
+    "is_job_post": true,
+    "detected_specializations": [
+      "Backend"
+    ],
+    "detected_grade": "senior",
+    "work_format": "remote",
+    "company": null,
+    "contact": "@fin_recruiter",
+    "technologies": [
+      "Python",
+      "FastAPI",
+      "PostgreSQL"
+    ],
+    "confidence": 0.9
+  },
+  "contract-gph-project": {
+    "is_job_post": true,
+    "detected_specializations": [
+      "Frontend"
+    ],
+    "salary_min": 2500,
+    "salary_max": null,
+    "salary_currency": "RUB/HOUR",
+    "work_format": "remote",
+    "company": "Pixelwave",
+    "contact": "hr@pixelwave.example",
+    "employment_type": "contract",
+    "technologies": [
+      "Vue"
+    ],
+    "confidence": 0.9
+  },
+  "part-time-qa-experience": {
+    "is_job_post": true,
+    "detected_specializations": [
+      "QA"
+    ],
+    "detected_grade": "junior",
+    "work_format": "remote",
+    "company": null,
+    "required_experience": "от 1 года",
+    "employment_type": "part-time",
+    "confidence": 0.9
+  },
+  "employer-en-full-time": {
+    "is_job_post": true,
+    "detected_specializations": [
+      "Backend"
+    ],
+    "detected_grade": "senior",
+    "work_format": "remote",
+    "company": "Acme Robotics",
+    "contact": "jobs@acme-robotics.example",
+    "required_experience": "5+ years",
+    "employment_type": "full-time",
+    "technologies": [
+      "Go",
+      "gRPC",
+      "PostgreSQL"
+    ],
+    "confidence": 0.9
   }
 }
