@@ -1,6 +1,8 @@
-"""Промпты для извлечения полей вакансии (RU + EN).
+"""Промпты LLM: извлечение полей вакансии (RU + EN), матчинг резюме, письма,
+адаптация резюме, подготовка к собеседованию, обзор рынка и «Спросить базу».
 
-Версии промптов (EXTRACT / MATCH / COVER_LETTER / RESUME_TAILOR):
+Версии промптов (EXTRACT / MATCH / COVER_LETTER / RESUME_TAILOR / INTERVIEW_PREP /
+MARKET_DIGEST / ASK_MARKET):
 - Bump при смысловом изменении system/user/few-shot (правила полей, схема,
   примеры) — иначе кэш LLM отдаст ответы от старого промпта.
 - Не bump при правках комментариев в этом файле или опечатках вне текста,
@@ -17,7 +19,7 @@ from jobdesk.ai.search_context import SearchContext
 from jobdesk.extraction.grade_extractor import GRADE_OPTIONS
 
 # Источник истины для ключа кэша extraction. Меняете промпт → bump.
-EXTRACT_PROMPT_VERSION = "extract-v11"
+EXTRACT_PROMPT_VERSION = "extract-v12"
 
 _SPECIALIZATION_RULES = """
 - detected_specializations — ONLY the job role(s) this post is hiring for (usually ONE primary role).
@@ -44,6 +46,20 @@ _SPECIALIZATION_RULES = """
   Canonical names: "Go" (not Golang), "PostgreSQL" (not Postgres), "Kafka", "REST", "1С".
   No roles ("QA", "AI"), no soft skills, no methodologies like "Agile"."""
 
+_EMPLOYER_RULES = """
+- company — the HIRING employer's name as written in the post («Ozon», "Acme Inc."); null if not named.
+  • NOT the Telegram channel, job board or aggregator that published the post, and not the recruiter's name.
+  • A recruiting/staffing agency hiring for a client → the client if named, otherwise the agency.
+  • A description without a name («крупный финтех», "international startup", «наш клиент») → null.
+- contact — how to reach the recruiter or apply: Telegram @username, email or phone stated in the post
+  (the recruiter's, first one). Not the channel's own @username or links in the channel footer. null if none.
+- required_experience — required work experience as a short phrase in the post's language
+  («от 3 лет», "5+ years", «без опыта»); null if not stated.
+- employment_type — one of full-time, part-time, contract; null if not stated.
+  Full-time: «полная занятость», "full-time". Part-time: «частичная занятость», "part-time".
+  Contract: contract, contractor, freelance, project-based, «ГПХ», «самозанятый», «проектная работа».
+  An internship is grade intern, not an employment_type."""
+
 _JOB_SEEKER_RULES = """
 - is_job_post=true ONLY when an employer/recruiter is hiring (offering a job).
 - Job seeker / candidate posts → is_job_post=false even if they name a role (e.g. "QA Engineer"):
@@ -66,6 +82,7 @@ Rules:
 - Numbers in URLs (vacancy id in path, e.g. /76348/) are NOT salary — salary_min/max must be null if pay is not stated in prose.
 """
     + _SPECIALIZATION_RULES
+    + _EMPLOYER_RULES
     + """
 - work_format: one of remote, hybrid, office, relocation, unknown (or null).
 - detected_grade: one of """
@@ -136,6 +153,7 @@ Example JSON:
         "work_format": "remote",
         "country": None,
         "city": None,
+        "company": None,
         "technologies": ["Go", "Kubernetes", "Docker"],
         "application_urls": ["https://example.com/careers/go"],
         "confidence": 0.9,
@@ -145,19 +163,27 @@ Example JSON:
 )
 
 _FEW_SHOT_AQA = """Example test automation post (stack is technologies, not a second role):
-"Ищем AQA (Python) в команду платежей. pytest, Playwright, CI в GitLab. Удалёнка."
+"PayLab ищет AQA (Python) в команду платежей. Опыт автотестов от 2 лет, pytest, Playwright, CI в GitLab.
+Удалёнка, полная занятость. Резюме: @paylab_hr
+—
+Больше вакансий в канале @it_jobs_feed"
+(no grade word → grade from required experience; the channel footer is not the contact)
 Example JSON:
 """ + json.dumps(
     {
         "is_job_post": True,
         "rejection_reason": None,
         "detected_specializations": ["Automation QA"],
-        "detected_grade": "unknown",
+        "detected_grade": "junior",
         "work_format": "remote",
+        "company": "PayLab",
+        "contact": "@paylab_hr",
+        "required_experience": "от 2 лет",
+        "employment_type": "full-time",
         "technologies": ["Python", "Pytest", "Playwright", "GitLab CI"],
         "application_urls": [],
         "confidence": 0.9,
-        "notes": "Зарплата и компания в тексте не указаны.",
+        "notes": "Зарплата в тексте не указана.",
     },
     ensure_ascii=False,
 )
@@ -201,6 +227,7 @@ Example JSON:
         "salary_max": 40,
         "salary_currency": "USD/HOUR",
         "work_format": "remote",
+        "employment_type": "contract",
         "application_urls": ["https://careers.example.com/rn"],
         "confidence": 0.9,
         "notes": None,
@@ -231,7 +258,9 @@ Example JSON:
 )
 
 _FEW_SHOT_ANNUAL_USD_K = """Example western $Nk annual (convert to monthly; no Annually word needed):
-"Hiring AI/frontend engineers. $125k–225k + equity, relocation to London. Apply https://jobs.example.com/ai"
+"Hiring frontend engineers (React) for our AI product. $125k–225k + equity, relocation to London.
+Apply https://jobs.example.com/ai"
+(an AI product does not make the role AI: the person builds UI → Frontend)
 Example JSON:
 """ + json.dumps(
     {
@@ -244,6 +273,7 @@ Example JSON:
         "salary_currency": "USD",
         "work_format": "relocation",
         "city": "London",
+        "technologies": ["React"],
         "application_urls": ["https://jobs.example.com/ai"],
         "confidence": 0.9,
         "notes": "Вилка $125k–225k годовая — сохранена как месячная (/12).",
@@ -259,7 +289,7 @@ Example JSON:
         "is_job_post": True,
         "rejection_reason": None,
         "detected_specializations": ["QA"],
-        "detected_grade": "middle",
+        "detected_grade": "unknown",
         "salary_min": 2167,
         "salary_max": 3250,
         "salary_currency": "EUR",
@@ -267,7 +297,7 @@ Example JSON:
         "country": "Slovakia",
         "application_urls": ["https://jobs.example.com/qa"],
         "confidence": 0.9,
-        "notes": "Annually → месячные суммы (/12), даже если год выглядит «как месяц» директора.",
+        "notes": "Вилка годовая (Annually) — сохранена как месячная (/12). Грейд в тексте не указан.",
     },
     ensure_ascii=False,
 )
@@ -316,7 +346,7 @@ def build_messages(
     ]
 
 
-MATCH_PROMPT_VERSION = "match-v2"
+MATCH_PROMPT_VERSION = "match-v3"
 
 MATCH_SYSTEM_PROMPT = """
 You are an expert technical recruiter evaluating how well a candidate's resume
@@ -327,6 +357,17 @@ and vacancy.
 
 Do not invent candidate experience, skills, seniority, domain knowledge,
 certifications, responsibilities, employment history, location, or work format.
+
+The vacancy is often a Telegram post: channel footers, links to other
+vacancies, hashtags, ads and @mentions of the channel are NOT requirements —
+ignore them.
+
+Language: write every text field (skill evidence, strengths, risks,
+explanation) in Russian, even if the vacancy or resume is in English.
+Technology and tool names stay in their canonical Latin spelling everywhere,
+including "skill": "Python", "PostgreSQL", "Kubernetes", "Kafka" — even when
+the vacancy writes «питон», «постгрес», «кубер», «кафка». A "skill" that is
+not a technology (domain, practice, language level) is a short Russian phrase.
 
 Return ONE valid JSON object only.
 No markdown.
@@ -500,7 +541,7 @@ Constraints:
 - missing_skills: maximum 8 items
 - strengths: maximum 5 items
 - risks: maximum 5 items
-- explanation: Russian
+- evidence, strengths, risks, explanation: Russian
 - output must be valid JSON
 - output must match the schema exactly
 """.strip()
@@ -819,7 +860,7 @@ def build_interview_prep_messages(
     ]
 
 
-MARKET_DIGEST_PROMPT_VERSION = "market-digest-v2"
+MARKET_DIGEST_PROMPT_VERSION = "market-digest-v3"
 
 MARKET_DIGEST_SYSTEM_PROMPT = """
 You are an IT job market analyst. Write a short weekly digest for job
@@ -830,8 +871,15 @@ Rules (most important):
 - Use ONLY numbers and names present in FACTS. Never invent numbers,
   percentages, companies, reasons or forecasts.
 - Compare only what FACTS compares: this week vs the previous week
-  (vacancies, roles, formats, companies), 28 days vs the previous 28 days
-  (salaries), this week vs the 4 weeks before (technology shares).
+  (vacancies, roles, formats, companies, sources), 28 days vs the previous 28
+  days (salaries), this week vs the 4 weeks before (technology shares).
+- Volume: vacancies vs previous_vacancies is one week against one week; also
+  check avg_4w_vacancies (average week over the 4 weeks before). Call it
+  growth or a drop only if the week differs from both; if the previous week
+  alone was unusual, say the volume is near the 4-week average.
+- with_salary_share — share of this week's vacancies that state a salary.
+- sources — top Telegram channels / HH by vacancies; mention only a large
+  change, never list them all.
 - If a section is empty or the numbers are small, skip it rather than
   draw conclusions. Do not explain causes.
 - New companies are ONLY those listed in new_companies. A company in
@@ -865,7 +913,7 @@ def build_market_digest_messages(*, facts_json: str) -> list[dict[str, str]]:
     ]
 
 
-ASK_MARKET_PROMPT_VERSION = "ask-market-v1"
+ASK_MARKET_PROMPT_VERSION = "ask-market-v2"
 
 ASK_MARKET_PLAN_SYSTEM_PROMPT = """
 You translate a job seeker's question about the IT job market into a query
@@ -938,6 +986,18 @@ Rules (most important):
   companies, reasons, forecasts or advice not backed by FACTS.
 - FACTS.filters says what was counted; mention the scope in a few words
   ("по 340 вакансиям Senior Python за год").
+- FACTS.unrecognized_filters (if present) are conditions from the question that
+  could NOT be applied: say so in the first sentence ("роль «X» в базе не
+  различается — цифры по всем вакансиям Backend") and never present the numbers
+  as if they were filtered by them.
+- count.vacancies — all matching vacancies over the period, including closed
+  (archived) ones; count.active — those still open now. Never call
+  count.vacancies "открытые" / "сейчас ищут"; say "за период" and give active
+  separately when the question is about now.
+- trend: a month with partial=true is not over yet — do not compare its
+  vacancy count with full months and do not call it a drop.
+- lifetime is computed over Telegram vacancies only (telegram_vacancies).
+- Do not print vacancy ids from examples.
 - If the numbers are small (fewer than ~10 vacancies, a median from fewer than
   ~8 salaries) say that the data is thin. If FACTS lack what was asked, say so.
 - Salaries are monthly, in roubles; write them like "250 тыс. ₽". Shares are

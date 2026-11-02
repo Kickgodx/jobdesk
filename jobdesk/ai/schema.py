@@ -12,6 +12,36 @@ from jobdesk.extraction.grade_extractor import GRADE_OPTIONS, normalize_grade
 _VALID_GRADES = frozenset(GRADE_OPTIONS)
 _VALID_WORK_FORMATS = frozenset({"remote", "hybrid", "office", "relocation", "unknown"})
 
+# Те же значения, что дают правила (``ingestion.rules._extract_employment``).
+_EMPLOYMENT_ALIASES = {
+    "full-time": "full-time",
+    "full time": "full-time",
+    "fulltime": "full-time",
+    "полная": "full-time",
+    "полная занятость": "full-time",
+    "part-time": "part-time",
+    "part time": "part-time",
+    "parttime": "part-time",
+    "частичная": "part-time",
+    "частичная занятость": "part-time",
+    "contract": "contract",
+    "contractor": "contract",
+    "freelance": "contract",
+    "project": "contract",
+    "project-based": "contract",
+    "контракт": "contract",
+    "гпх": "contract",
+    "проектная работа": "contract",
+}
+
+
+def normalize_employment_type(v: object) -> str | None:
+    """Занятость ответа LLM → full-time / part-time / contract; прочее — None."""
+    if not isinstance(v, str):
+        return None
+    key = " ".join(v.strip().lower().replace("_", "-").split())
+    return _EMPLOYMENT_ALIASES.get(key)
+
 
 def _coerce_optional_str(v: object) -> str | None:
     """Строковые поля: модели иногда отдают list вместо str."""
@@ -83,7 +113,10 @@ class VacancyAIExtraction(BaseModel):
         ),
     )
     required_experience: str | None = None
-    employment_type: str | None = None
+    employment_type: str | None = Field(
+        default=None,
+        description="One of full-time, part-time, contract; null if the post does not state it.",
+    )
     application_urls: list[str] = Field(default_factory=list)
 
     confidence: float = Field(default=0.5, ge=0, le=1)
@@ -99,13 +132,17 @@ class VacancyAIExtraction(BaseModel):
         "company",
         "contact",
         "required_experience",
-        "employment_type",
         "notes",
         mode="before",
     )
     @classmethod
     def norm_optional_str_fields(cls, v: object) -> str | None:
         return _coerce_optional_str(v)
+
+    @field_validator("employment_type", mode="before")
+    @classmethod
+    def norm_employment_type(cls, v: object) -> str | None:
+        return normalize_employment_type(_coerce_optional_str(v))
 
     @field_validator(
         "detected_specializations",

@@ -14,7 +14,7 @@ from backend.services import ask_market_service
 from backend.services.ask_market_service import compute_facts, normalize_filters
 from backend.settings import get_settings
 from jobdesk.ai.clients.openrouter import LLMUsage, OpenRouterClient, _parse_market_plan
-from jobdesk.ai.prompts import build_ask_market_plan_messages
+from jobdesk.ai.prompts import build_ask_market_answer_messages, build_ask_market_plan_messages
 from jobdesk.ai.schema import MarketQueryFilters, MarketQueryPlan
 from jobdesk.config.loader import load_config
 from jobdesk.config.schema import AiConfig
@@ -138,6 +138,23 @@ def test_compute_facts_topics_and_variants(db_session):
     assert len(facts["examples"]) == 5  # активные, свежие первыми
     assert "technologies" not in facts and "trend" not in facts
     assert [(v["label"], v["count"]["vacancies"]) for v in facts["variants"]] == [("Go", 1), ("Python", 6)]
+
+
+def test_trend_marks_current_month_partial(db_session):
+    now = datetime.now(UTC)
+    month_start = now.replace(day=1, hour=12, minute=0, second=0, microsecond=0)
+    db_session.add_all([_vac(post_date=now), _vac(post_date=month_start - timedelta(days=40))])
+    db_session.commit()
+    trend = compute_facts(db_session, {}, ["trend"], [])["trend"]
+    assert trend[-1]["month"] == now.strftime("%Y-%m") and trend[-1]["partial"] is True
+    assert all("partial" not in m for m in trend[:-1]) and len(trend) == 2
+
+
+def test_answer_prompt_explains_scope_fields():
+    system = build_ask_market_answer_messages(question="q", facts_json="{}")[0]["content"]
+    assert "unrecognized_filters" in system
+    assert "count.active" in system
+    assert "partial=true" in system
 
 
 # --- Джоба
