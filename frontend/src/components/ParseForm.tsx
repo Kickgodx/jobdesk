@@ -184,7 +184,7 @@ export default function ParseForm({ onSubmit, disabled, isSubmitting }: Props) {
           <input
             type="range"
             min={0}
-            max={10}
+            max={100}
             value={form.vacancyScoreThreshold}
             onChange={(e) => patch({ vacancyScoreThreshold: Number(e.target.value) })}
           />
@@ -194,7 +194,7 @@ export default function ParseForm({ onSubmit, disabled, isSubmitting }: Props) {
           <input
             type="range"
             min={0}
-            max={10}
+            max={100}
             value={form.vacancyMinSubstantive}
             onChange={(e) => patch({ vacancyMinSubstantive: Number(e.target.value) })}
           />

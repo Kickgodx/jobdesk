@@ -23,8 +23,8 @@ def _vacancy(text: str = "Python backend developer, Django, PostgreSQL", **kwarg
         "source_url": "https://t.me/s/ch",
         "raw_text": text,
         "cleaned_text": text,
-        "vacancy_score": 10,
-        "vacancy_substantive_score": 5,
+        "vacancy_score": 83,
+        "vacancy_substantive_score": 42,
     }
     fields.update(kwargs)
     return Vacancy(**fields)
@@ -197,10 +197,10 @@ def test_apply_post_filters_score_threshold():
 
 def test_apply_post_filters_substantive_score_threshold():
     cfg = AppConfig()
-    cfg.parser.vacancy_min_substantive_score = 2
+    cfg.parser.vacancy_min_substantive_score = 17
 
-    assert apply_post_filters(_vacancy(vacancy_substantive_score=2), cfg) is True
-    assert apply_post_filters(_vacancy(vacancy_substantive_score=1), cfg) is False
+    assert apply_post_filters(_vacancy(vacancy_substantive_score=17), cfg) is True
+    assert apply_post_filters(_vacancy(vacancy_substantive_score=8), cfg) is False
 
 
 @pytest.mark.parametrize(

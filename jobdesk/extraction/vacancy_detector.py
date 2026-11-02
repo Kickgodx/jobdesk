@@ -96,11 +96,22 @@ def _not_vacancy(t: str) -> bool:
     return bool(_SEEKER_TAGS.search(t)) and not _VACANCY_TAGS.search(t)
 
 
+# Сумма весов всех признаков ниже (3+2+2+1+1+2+1). Сырые баллы нормируются на шкалу 0–100 —
+# ту же, что у вакансий HH (``VACANCY_SCORE = 100`` в ``hh/mapper``).
+_MAX_RAW_SCORE = 12
+VACANCY_SCORE_MAX = 100
+
+
+def _to_scale(raw: int) -> int:
+    """Сырые баллы → 0–100. Формулу повторяет миграция ``052_vacancy_score_100``."""
+    return min(VACANCY_SCORE_MAX, round(raw * VACANCY_SCORE_MAX / _MAX_RAW_SCORE))
+
+
 def compute_vacancy_score(raw_text: str) -> tuple[int, str, int]:
     """
-    Возвращает ``(score, reason_human, substantive_score)``.
+    Возвращает ``(score, reason_human, substantive_score)``, обе оценки — по шкале 0–100.
 
-    ``substantive_score`` — сумма баллов **без** бонуса за email или @username (контакт):
+    ``substantive_score`` — баллы **без** бонуса за email или @username (контакт):
     нужен, чтобы не пропускать посты только из‑за одного упоминания контакта.
 
     Чем выше ``score`` — тем выше уверенность что это объявление о работе работодателя.
@@ -153,4 +164,4 @@ def compute_vacancy_score(raw_text: str) -> tuple[int, str, int]:
         hints.append("work_format")
 
     reason = "+".join(hints) if hints else "baseline"
-    return score, reason, substantive
+    return _to_scale(score), reason, _to_scale(substantive)

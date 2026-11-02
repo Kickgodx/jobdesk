@@ -101,8 +101,8 @@ def _v(specs: list[str], techs: list[str]) -> Vacancy:
         cleaned_text="x",
         detected_specializations=specs,
         technologies=techs,
-        vacancy_score=10,
-        vacancy_substantive_score=10,
+        vacancy_score=83,
+        vacancy_substantive_score=83,
     )
 
 
