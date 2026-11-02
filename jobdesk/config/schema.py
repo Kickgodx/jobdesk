@@ -605,7 +605,8 @@ class AiConfig(BaseModel):
     skip_if_vacancy_score_below: int = Field(
         default=0,
         ge=0,
-        description="Не вызывать LLM для постов с score ниже (0 = все посты).",
+        le=100,
+        description="Не вызывать LLM для постов с score (0–100) ниже (0 = все посты).",
     )
     concurrency: int = Field(
         default=1,
@@ -831,13 +832,19 @@ class FiltersConfig(BaseModel):
 
 
 class ParserConfig(BaseModel):
-    vacancy_score_threshold: int = 3
+    vacancy_score_threshold: int = Field(
+        default=25,
+        ge=0,
+        le=100,
+        description="Минимальный vacancy_score правил, шкала 0–100 (один признак — 8–25 баллов).",
+    )
     vacancy_min_substantive_score: int = Field(
         default=0,
         ge=0,
+        le=100,
         description=(
-            "Минимальный vacancy_substantive_score: баллы без учёта email/@. "
-            "Например 1 отсечёт пост «только упомянули @канал без зарплаты/офис/vacancy…» при низком пороге общего счёта."
+            "Минимальный vacancy_substantive_score (0–100): баллы без учёта email/@. "
+            "Например 8 отсечёт пост «только упомянули @канал без зарплаты/офис/vacancy…» при низком пороге общего счёта."
         ),
     )
     max_posts_per_channel: int = Field(

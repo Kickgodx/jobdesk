@@ -7,8 +7,20 @@ def test_hiring_post_scores():
     score, _, substantive = compute_vacancy_score(
         "Вакансия: Python developer remote, salary 3000-4000 USD, contact @hr_bot",
     )
-    assert score >= 3
-    assert substantive >= 1
+    assert score >= 25
+    assert substantive >= 8
+
+
+def test_score_uses_100_point_scale():
+    # Все признаки сразу — 100, как у вакансий HH; без контакта — 83 (10 из 12 сырых баллов).
+    text = "Вакансия, company: Acme. Senior Python developer, remote, зарплата 300 000 руб, пишите @hr_bot"
+    score, reason, substantive = compute_vacancy_score(text)
+    assert (score, substantive) == (100, 83), reason
+
+
+def test_contact_only_scores_on_100_point_scale():
+    score, _, substantive = compute_vacancy_score("пишите @someone")
+    assert (score, substantive) == (17, 0)
 
 
 def test_resume_excluded_zero():

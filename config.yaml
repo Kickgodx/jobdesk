@@ -94,7 +94,8 @@ ai:
   # Сопроводительные письма идут отдельной моделью; пусто — match_model, затем model.
   # cover_letter_model:
   max_posts_per_run: 0
-  skip_if_vacancy_score_below: 1
+  # Шкала score 0–100: 8 — хотя бы один признак вакансии (см. config.md).
+  skip_if_vacancy_score_below: 8
   concurrency: 8
   # Фоновые джобы мэтчинга / писем (in-process ThreadPool); не путать с concurrency парсинга.
   interactive_concurrency: 4
@@ -199,9 +200,10 @@ parser:
   # Если прогон упадёт, уже записанные батчи не потеряются.
   db_flush_every_posts: 500
   db_flush_pending_vacancies: 100
-  vacancy_score_threshold: 1
-  # Минимум «содержательных» баллов (всё кроме признаков email/@). 1 — не брать только @упоминания.
-  vacancy_min_substantive_score: 1
+  # Шкала 0–100 (как у HH): 8 — хотя бы один признак вакансии.
+  vacancy_score_threshold: 8
+  # Минимум «содержательных» баллов (всё кроме признаков email/@). 8 — не брать только @упоминания.
+  vacancy_min_substantive_score: 8
   # Лимит сообщений с канала: для Telethon при заданных date_from/date_to — сколько сообщений подряд
   # можно просмотреть (от новых к старым), пока не выйдем за date_from или не упрёмся в лимит.
   max_posts_per_channel: 20000

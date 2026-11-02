@@ -34,7 +34,7 @@ LLM-разбор постов и текстов вакансий: режимы `
 Пост с `vacancy_score` ниже `ai.skip_if_vacancy_score_below` (0 — отправляются все) MUST отбрасываться без вызова LLM в обоих режимах. Ручной импорт этот порог не применяет.
 
 #### Scenario: Оценка ниже порога LLM
-- **WHEN** `ai.skip_if_vacancy_score_below: 3`, а у поста `vacancy_score` 1
+- **WHEN** `ai.skip_if_vacancy_score_below: 25`, а у поста `vacancy_score` 8
 - **THEN** LLM не вызывается, пост не сохраняется
 
 ### Requirement: Пост, который LLM признал не вакансией, отбрасывается

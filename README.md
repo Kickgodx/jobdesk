@@ -1158,7 +1158,7 @@ poetry run python -c "import telethon; print(telethon.__version__)"
 
 ### Отбор постов (`parser`)
 
-- **`vacancy_score_threshold`** — минимальный общий score правил.
+- **`vacancy_score_threshold`** — минимальный общий score правил по шкале 0–100 (как у HH, там всегда 100).
 - **`vacancy_min_substantive_score`** — минимум без бонуса за email/@ (отсекает «пустые» контакты).
 - Пост соискателя (`#resume`, `#cv`, `#ищуработу`, `#opentowork`, «ищу работу»; хэштег соискателя не
   считается, если рядом `#вакансия`/`#vacancy`/`#hiring`) и подборка вакансий («Подборка вакансий»,
