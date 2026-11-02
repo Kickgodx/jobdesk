@@ -86,7 +86,8 @@ ai:
   # Пусто — берётся model выше. При смене на reasoning-модель включи match_reasoning_enabled.
   # match_model: google/gemini-3.8-flash
   # match_model: z-ai/glm-5.3
-  match_model: xiaomi/mimo-v2.6-pro
+  # match_model: xiaomi/mimo-v2.6-pro
+  match_model: openai/gpt-6.1-terra
   match_reasoning_enabled: true
   # Уровень рассуждений (OpenRouter reasoning.effort): max / xhigh / high / medium / low /
   # minimal / none; пусто — дефолт модели. Неподдерживаемый уровень сводится к ближайшему.
@@ -114,7 +115,8 @@ ai:
   # на случай повторной публикации того же текста. 0 — без срока.
   cache_ttl_days: 45
   reasoning_enabled: false
-  max_completion_tokens: 8192
+  # Общий потолок на рассуждения и ответ: reasoning-модели матчинга (high и выше) в 8192 не всегда укладываются.
+  max_completion_tokens: 16384
   allow_unknown_specializations: true
   use_few_shot: true
 
