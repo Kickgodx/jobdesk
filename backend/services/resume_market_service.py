@@ -24,9 +24,13 @@ from backend.services.skill_gap_service import technology_matcher
 from jobdesk.analytics.skill_gaps import mentions
 
 WINDOW_DAYS = 365
-# Профиль и технологии — по стольким ближайшим вакансиям.
-PEERS = 50
-# Квантили зарплаты — по стольким ближайшим вакансиям с зарплатой (из CANDIDATES ближайших).
+# Профиль и технологии — по стольким ближайшим вакансиям (выбирает клиент в этих пределах).
+DEFAULT_PEERS = 100
+MIN_PEERS = 10
+# HNSW отдаёт не больше ef_search строк, а pgvector не даёт поднять его выше 1000.
+MAX_PEERS = 500
+# Квантили зарплаты — по всем вакансиям с зарплатой среди ближайших, но не меньше стольких
+# ближайших с зарплатой из CANDIDATES (у большинства вакансий зарплаты нет).
 SALARY_PEERS = 30
 MIN_SALARY_PEERS = 8
 CANDIDATES = 200
@@ -59,10 +63,11 @@ def nearest_vacancies(
     now: datetime,
     limit: int = CANDIDATES,
     specialization: str | None = None,
+    grade: str | None = None,
 ) -> list:
     """Ближайшие к вектору уникальные вакансии за окно: (грейд, роли, технологии, зарплата ₽).
 
-    ``specialization`` — только вакансии этой роли.
+    ``specialization`` — только вакансии этой роли, ``grade`` — только этого грейда.
     """
     e = VacancyEmbeddingRow
     v = VacancyRow
@@ -74,11 +79,15 @@ def nearest_vacancies(
         v.is_duplicate.is_(False),
         v.post_date >= now - timedelta(days=WINDOW_DAYS),
     ]
-    if specialization:
-        # Фильтр по роли отсекает большую часть ближайших: без iterative scan (pgvector ≥ 0.8)
-        # HNSW отдал бы ef_search ближайших вообще, и после фильтра осталось бы несколько строк.
+    if specialization or grade:
+        # Фильтр по роли или грейду отсекает большую часть ближайших: без iterative scan
+        # (pgvector ≥ 0.8) HNSW отдал бы ef_search ближайших вообще, и после фильтра осталось бы
+        # несколько строк.
         session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
+    if specialization:
         conditions.append(v.detected_specializations.contains([specialization]))
+    if grade:
+        conditions.append(v.detected_grade == grade)
     stmt = (
         select(v.detected_grade, v.detected_specializations, v.technologies, v.detected_salary_avg_rub)
         .select_from(e)
@@ -108,18 +117,26 @@ def resume_technology_check(session: Session, resume: ResumeRow) -> tuple[list[s
     return resume_techs, in_resume
 
 
-def resume_market(session: Session, resume: ResumeRow) -> ResumeMarketOut:
-    """Профиль рынка для резюме; ``EmbeddingsUnavailable`` — эмбеддинги выключены или недоступны."""
+def resume_market(
+    session: Session, resume: ResumeRow, *, peers_limit: int = DEFAULT_PEERS, grade: str | None = None
+) -> ResumeMarketOut:
+    """Профиль рынка для резюме по ``peers_limit`` ближайшим (``grade`` — только этого грейда).
+
+    ``EmbeddingsUnavailable`` — эмбеддинги выключены или недоступны.
+    """
     vector = embedding_service.resume_embedding(session, resume)
     model = embedding_service._ai().embeddings.model
-    rows = nearest_vacancies(session, vector, model=model, now=datetime.now(UTC))
+    rows = nearest_vacancies(
+        session, vector, model=model, now=datetime.now(UTC), limit=max(CANDIDATES, peers_limit), grade=grade
+    )
     salary_display = _prepare_fx(session)
     resume_techs, in_resume = resume_technology_check(session, resume)
 
-    peers = rows[:PEERS]
+    peers = rows[:peers_limit]
     out = ResumeMarketOut(
         resume_id=resume.id,
         window_days=WINDOW_DAYS,
+        grade=grade,
         peers=len(peers),
         resume_technologies=resume_techs,
         salary_display=salary_display,
@@ -136,8 +153,12 @@ def resume_market(session: Session, resume: ResumeRow) -> ResumeMarketOut:
         for s in _shares(techs, len(peers), TOP_TECHNOLOGIES)
         if s.share >= MIN_TECH_SHARE
     ]
-    # Ближайшие с зарплатой — из всех кандидатов: у большинства вакансий зарплаты нет.
-    salaries = sorted([float(s) for *_, s in rows if s is not None][:SALARY_PEERS])
+    # Зарплаты — той же выборки; у большинства вакансий зарплаты нет, поэтому при малой выборке
+    # добираем ближайших с зарплатой из всех кандидатов.
+    salaries = [float(s) for *_, s in peers if s is not None]
+    if len(salaries) < SALARY_PEERS:
+        salaries = [float(s) for *_, s in rows if s is not None][:SALARY_PEERS]
+    salaries.sort()
     update: dict = {
         "grades": _shares(grades, len(peers), TOP_PROFILE),
         "specializations": _shares(roles, len(peers), TOP_PROFILE),

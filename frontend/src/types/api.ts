@@ -408,6 +408,8 @@ export interface ResumeMarketTechnology extends MarketShare {
 export interface ResumeMarket {
   resume_id: number;
   window_days: number;
+  /** Ближайшие только этого грейда; null — все грейды. */
+  grade: string | null;
   peers: number;
   grades: MarketShare[];
   specializations: MarketShare[];
