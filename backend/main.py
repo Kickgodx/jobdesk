@@ -233,9 +233,11 @@ async def lifespan(_app: FastAPI):
 
     # LLM в inprocess-режиме идёт в этом процессе; RPM общий с воркерами.
     register_core_ports()
-    from backend.observability import init_llm_model_series
+    from backend.observability import init_llm_job_series, init_llm_model_series
+    from backend.services.llm_job_service import ALL_KINDS
 
     init_llm_model_series()
+    init_llm_job_series(ALL_KINDS, backend=get_settings().llm_job_backend_normalized)
     env = get_settings()
     log.info(
         "APP_ENV=%s: регистрация новых пользователей %s, тела HTTP в логах %s",

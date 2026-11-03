@@ -8,12 +8,14 @@ from backend.workers.runner import run_rq_worker
 
 def _setup() -> None:
     from backend.core_ports import register_core_ports
-    from backend.observability import init_llm_model_series
+    from backend.observability import init_llm_job_series, init_llm_model_series
+    from backend.services.llm_job_service import ALL_KINDS
 
     # Ручной импорт идёт через AIEnrichmentService — без кэша LLM он не создаётся.
     # Реплики llm-worker делят один ai.requests_per_minute, а не умножают его.
     register_core_ports()
     init_llm_model_series()
+    init_llm_job_series(ALL_KINDS)
 
 
 def main() -> None:

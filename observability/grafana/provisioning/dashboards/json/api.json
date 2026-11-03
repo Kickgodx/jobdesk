@@ -208,7 +208,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_requests_total{status=~\"5..\", handler!=\"/api/v1/runs/{run_id}\", method!=\"OPTIONS\"}[5m])) / sum(rate(http_requests_total{handler!=\"/api/v1/runs/{run_id}\", method!=\"OPTIONS\"}[5m])) * 100",
+          "expr": "(sum(rate(http_requests_total{status=~\"5..\", handler!=\"/api/v1/runs/{run_id}\", method!=\"OPTIONS\"}[5m])) or vector(0)) / sum(rate(http_requests_total{handler!=\"/api/v1/runs/{run_id}\", method!=\"OPTIONS\"}[5m])) * 100",
           "legendFormat": "5xx",
           "refId": "A"
         }
@@ -355,7 +355,7 @@
       "targets": [
         {
           "expr": "process_resident_memory_bytes{job=\"jobdesk-backend\"}",
-          "legendFormat": "RSS",
+          "legendFormat": "RSS {{pid}}",
           "refId": "A"
         }
       ],
@@ -381,7 +381,7 @@
       "targets": [
         {
           "expr": "rate(process_cpu_seconds_total{job=\"jobdesk-backend\"}[5m])",
-          "legendFormat": "CPU cores",
+          "legendFormat": "CPU {{pid}}",
           "refId": "A"
         }
       ],
@@ -407,7 +407,7 @@
       "targets": [
         {
           "expr": "process_open_fds{job=\"jobdesk-backend\"}",
-          "legendFormat": "open FDs",
+          "legendFormat": "FDs {{pid}}",
           "refId": "A"
         }
       ],
@@ -439,7 +439,7 @@
       },
       "targets": [
         {
-          "expr": "time() - process_start_time_seconds{job=\"jobdesk-backend\"}",
+          "expr": "min(time() - process_start_time_seconds{job=\"jobdesk-backend\"})",
           "legendFormat": "uptime",
           "refId": "A"
         }

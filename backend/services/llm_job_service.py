@@ -38,6 +38,17 @@ BATCH_KINDS = frozenset({KIND_IMPORT, KIND_REEXTRACT, KIND_MATCH_BATCH})
 KIND_ASK_MARKET = "ask_market"
 # Без пары резюме–вакансия: активная джоба не переиспользуется (у каждой свои тексты / вопрос).
 PAIRLESS_KINDS = BATCH_KINDS | {KIND_ASK_MARKET}
+# Все виды — для нулевых серий метрик (observability.init_llm_job_series).
+ALL_KINDS = (
+    KIND_MATCH,
+    KIND_COVER_LETTER,
+    KIND_RESUME_TAILOR,
+    KIND_INTERVIEW_PREP,
+    KIND_IMPORT,
+    KIND_REEXTRACT,
+    KIND_MATCH_BATCH,
+    KIND_ASK_MARKET,
+)
 
 # Импорт — до 50 текстов, каждый со своим вызовом LLM: базового таймаута RQ на него мало.
 IMPORT_SECONDS_PER_TEXT = 60
