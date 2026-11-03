@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -47,6 +47,7 @@ from backend.services.llm_result_freshness import (
     match_is_stale,
     resume_tailoring_is_stale,
 )
+from backend.services.resume_market_service import DEFAULT_PEERS, MAX_PEERS, MIN_PEERS, resume_market
 from backend.services.skill_gap_service import skill_gaps
 from jobdesk.ai.schema import (
     InterviewGap,
@@ -179,17 +180,30 @@ def get_skill_gaps(
 @resumes_router.get("/{resume_id}/market", response_model=ResumeMarketOut)
 def get_resume_market(
     resume_id: int,
+    peers: int = Query(
+        default=DEFAULT_PEERS,
+        ge=MIN_PEERS,
+        le=MAX_PEERS,
+        description="Сколько ближайших вакансий учитывать в профиле и технологиях.",
+    ),
+    grade: str | None = Query(
+        default=None, max_length=32, description="Только вакансии этого грейда (junior, middle, senior, lead…)."
+    ),
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> ResumeMarketOut:
     """Резюме против рынка: вилка, профиль и технологии ближайших по смыслу вакансий (без LLM)."""
-    from backend.errors import CODE_UPSTREAM_UNAVAILABLE, http_error
+    from backend.errors import CODE_UPSTREAM_UNAVAILABLE, CODE_VALIDATION, http_error
     from backend.services.embedding_service import EmbeddingsUnavailable
-    from backend.services.resume_market_service import resume_market
+    from jobdesk.extraction.grade_extractor import UNKNOWN_GRADE, normalize_grade
 
     resume = _get_own_resume(db, resume_id, user)
+    if grade:
+        grade = normalize_grade(grade)
+        if grade == UNKNOWN_GRADE:
+            raise http_error(422, CODE_VALIDATION, "Неизвестный грейд.", retryable=False)
     try:
-        return resume_market(db, resume)
+        return resume_market(db, resume, peers_limit=peers, grade=grade or None)
     except EmbeddingsUnavailable as e:
         raise http_error(503, CODE_UPSTREAM_UNAVAILABLE, f"Сравнение с рынком недоступно: {e}", retryable=True) from e
 

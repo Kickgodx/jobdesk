@@ -12,7 +12,15 @@ from backend.db.models import VacancyRow
 from backend.db.session import session_scope
 from backend.db.vector_type import EMBEDDING_DIMENSIONS
 from backend.services import embedding_service
-from backend.services.resume_market_service import MIN_SALARY_PEERS, WINDOW_DAYS, quantile
+from backend.services.resume_market_service import (
+    DEFAULT_PEERS,
+    MAX_PEERS,
+    MIN_PEERS,
+    MIN_SALARY_PEERS,
+    SALARY_PEERS,
+    WINDOW_DAYS,
+    quantile,
+)
 
 _TOPICS = ["python", "golang", "qa", "тестиров"]
 
@@ -110,10 +118,11 @@ def test_market_profile_salary_and_technologies(api_client, fake_embed):
     token = _token(api_client)
     rid = _resume(api_client, token, "QA тестировщик: Python, pytest, немного Docker")
 
-    r = api_client.get(f"/api/v1/resumes/{rid}/market", headers=_h(token))
+    r = api_client.get(f"/api/v1/resumes/{rid}/market", headers=_h(token), params={"peers": 50})
     assert r.status_code == 200, r.text
     m = r.json()
     assert m["peers"] == 50  # 10 QA ближе всех, дальше Go; дубль и старая — мимо
+    assert m["grade"] is None
     assert m["specializations"][0] == {"name": "Backend", "share": 0.8}
     assert {"name": "Automation QA", "share": 0.2} in m["specializations"]
     techs = {t["name"]: t for t in m["technologies"]}
@@ -122,9 +131,9 @@ def test_market_profile_salary_and_technologies(api_client, fake_embed):
     assert techs["Go"]["share"] == 0.8
     assert {"Python", "Pytest"} <= set(m["resume_technologies"])
     assert m["grades"][0]["name"] == "senior"
-    # Зарплата — по 30 ближайшим с зарплатой: 10 QA + 20 Go.
-    assert m["salary_count"] == 30
-    assert m["p10"] == pytest.approx(quantile(sorted([100_000 + 10_000 * i for i in range(10)] + [900_000] * 20), 0.1))
+    # Зарплата — по всем ближайшим с зарплатой той же выборки: 10 QA + 40 Go.
+    assert m["salary_count"] == 50
+    assert m["p10"] == pytest.approx(quantile(sorted([100_000 + 10_000 * i for i in range(10)] + [900_000] * 40), 0.1))
     assert m["median"] == 900_000
     # Python+Pytest — весь стек в резюме, Python+Selenium — половина, Go — ничего.
     assert 0 < m["coverage"] < 1
@@ -167,3 +176,61 @@ def test_nested_technology_name_counts_as_in_resume(api_client, fake_embed):
     techs = {t["name"]: t["in_resume"] for t in m["technologies"]}
     assert techs["Jira"] is True and techs["Atlassian Jira"] is True
     assert m["coverage"] == 1.0
+
+
+def test_market_peers_default_and_bounds(api_client, fake_embed):
+    _add(*[_vac("QA тестировщик python", detected_grade="middle") for _ in range(120)])
+    token = _token(api_client)
+    rid = _resume(api_client, token, "QA тестировщик")
+    url = f"/api/v1/resumes/{rid}/market"
+    assert api_client.get(url, headers=_h(token)).json()["peers"] == DEFAULT_PEERS
+    assert api_client.get(url, headers=_h(token), params={"peers": 20}).json()["peers"] == 20
+    assert api_client.get(url, headers=_h(token), params={"peers": MAX_PEERS}).json()["peers"] == 120
+    assert api_client.get(url, headers=_h(token), params={"peers": MAX_PEERS + 1}).status_code == 422
+    assert api_client.get(url, headers=_h(token), params={"peers": MIN_PEERS - 1}).status_code == 422
+
+
+def test_market_grade_filter(api_client, fake_embed):
+    """Фильтр по грейду берёт ближайших этого грейда, даже если другие грейды ближе."""
+    near_middle = [
+        _vac("QA тестировщик python", detected_grade="middle", detected_salary_avg_rub=150_000) for _ in range(30)
+    ]
+    far_senior = [
+        _vac(
+            "QA тестировщик python golang",
+            detected_grade="senior",
+            technologies=["Kubernetes"],
+            detected_salary_avg_rub=350_000,
+        )
+        for _ in range(10)
+    ]
+    _add(*near_middle, *far_senior)
+    token = _token(api_client)
+    rid = _resume(api_client, token, "QA тестировщик python")
+    url = f"/api/v1/resumes/{rid}/market"
+
+    m = api_client.get(url, headers=_h(token), params={"peers": 20}).json()
+    assert m["grades"] == [{"name": "middle", "share": 1.0}]
+
+    m = api_client.get(url, headers=_h(token), params={"peers": 20, "grade": "Senior"}).json()
+    assert m["grade"] == "senior"
+    assert m["peers"] == 10
+    assert m["grades"] == [{"name": "senior", "share": 1.0}]
+    assert m["technologies"][0]["name"] == "Kubernetes"
+    assert m["salary_count"] == 10 and m["median"] == 350_000
+
+    r = api_client.get(url, headers=_h(token), params={"grade": "boss"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "VALIDATION"
+
+
+def test_market_salary_extends_past_small_sample(api_client, fake_embed):
+    """В малой выборке мало зарплат — добираем ближайших с зарплатой из кандидатов."""
+    no_salary = [_vac("QA тестировщик python") for _ in range(15)]
+    paid = [_vac("QA тестировщик python golang", detected_salary_avg_rub=200_000) for _ in range(40)]
+    _add(*no_salary, *paid)
+    token = _token(api_client)
+    rid = _resume(api_client, token, "QA тестировщик python")
+    m = api_client.get(f"/api/v1/resumes/{rid}/market", headers=_h(token), params={"peers": 20}).json()
+    assert m["peers"] == 20
+    assert m["salary_count"] == SALARY_PEERS

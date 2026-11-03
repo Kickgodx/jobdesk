@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { ApiError, api } from "../api/client";
 import type { MarketShare } from "../types/api";
 import { formatThousands as k } from "../utils/formatSalary";
@@ -12,39 +13,75 @@ function shares(items: MarketShare[]): string {
   return items.map((s) => `${s.name} (${pct(s.share)})`).join(", ");
 }
 
+/** Сколько ближайших вакансий можно учитывать: больше — шире рынок, но дальше от резюме. */
+const PEER_OPTIONS = [50, 100, 200, 300, 500];
+const DEFAULT_PEERS = 100;
+
 /** «Резюме и рынок»: что платят и что требуют в вакансиях, ближайших к резюме по смыслу. */
 export default function ResumeMarketPanel({ resumeId }: { resumeId: number }) {
+  const [peers, setPeers] = useState(DEFAULT_PEERS);
+  const [grade, setGrade] = useState("");
+  const defaultsQ = useQuery({ queryKey: ["config-defaults"], queryFn: () => api.getConfigDefaults() });
+  const gradeOptions = (defaultsQ.data?.grade_options ?? []).filter((g) => g !== "unknown");
   const q = useQuery({
-    queryKey: ["resume-market", resumeId],
-    queryFn: () => api.getResumeMarket(resumeId),
+    queryKey: ["resume-market", resumeId, peers, grade],
+    queryFn: () => api.getResumeMarket(resumeId, { peers, grade: grade || undefined }),
     staleTime: 60_000,
     retry: false,
+    placeholderData: keepPreviousData,
   });
   const m = q.data;
   const unavailable = q.error instanceof ApiError && q.error.code === "UPSTREAM_UNAVAILABLE";
   return (
     <div className="card">
       <h3>Резюме и рынок</h3>
+      <div className="filters-panel">
+        <label title="Больше вакансий — устойчивее доли, но в выборку попадают менее похожие на резюме">
+          Вакансий{" "}
+          <select value={peers} onChange={(e) => setPeers(Number(e.target.value))}>
+            {PEER_OPTIONS.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label title="Только вакансии выбранного грейда: что платят и требуют на этом уровне">
+          Грейд{" "}
+          <select value={grade} onChange={(e) => setGrade(e.target.value)}>
+            <option value="">Все</option>
+            {gradeOptions.map((g) => (
+              <option key={g} value={g}>
+                {g}
+              </option>
+            ))}
+          </select>
+        </label>
+        {q.isFetching && !q.isLoading && <span className="caption">Обновление…</span>}
+      </div>
       {q.isLoading && <p>Загрузка…</p>}
       {unavailable && (
         <p className="muted">Нужны эмбеддинги (смысловой поиск): {(q.error as Error).message}</p>
       )}
       {q.error && !unavailable && <p className="error">{(q.error as Error).message}</p>}
-      {m && m.peers === 0 && (
+      {m && m.peers === 0 && !m.grade && (
         <p className="muted">Вакансий с векторами пока нет — индексация идёт в фоне каждые несколько минут.</p>
+      )}
+      {m && m.peers === 0 && m.grade && (
+        <p className="muted">Вакансий грейда {m.grade} за год нет — выберите другой грейд.</p>
       )}
       {m && m.peers > 0 && (
         <>
           <p className="caption">
-            По {m.peers} вакансиям, ближайшим к тексту резюме по смыслу, за {Math.round(m.window_days / 30)}{" "}
-            месяцев (с архивом).
+            По {m.peers} вакансиям{m.grade ? ` грейда ${m.grade}` : ""}, ближайшим к тексту резюме по смыслу,
+            за {Math.round(m.window_days / 30)} месяцев (с архивом).
           </p>
           {m.specializations.length > 0 && (
             <p>
               Роли: <strong>{shares(m.specializations)}</strong>
             </p>
           )}
-          {m.grades.length > 0 && (
+          {!m.grade && m.grades.length > 0 && (
             <p>
               Грейды: <strong>{shares(m.grades)}</strong>
             </p>

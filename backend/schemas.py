@@ -765,6 +765,7 @@ class ResumeMarketOut(BaseModel):
 
     resume_id: int
     window_days: int
+    grade: str | None = Field(default=None, description="Ближайшие только этого грейда; null — все грейды.")
     peers: int = Field(description="Сколько ближайших вакансий за окно взято для профиля и технологий.")
     grades: list[MarketShare] = Field(default_factory=list, description="Грейды ближайших, частые первыми.")
     specializations: list[MarketShare] = Field(default_factory=list, description="Роли ближайших.")

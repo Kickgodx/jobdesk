@@ -999,7 +999,14 @@ export const api = {
 
   getSkillGaps: (resumeId: number) => request<SkillGaps>(`/resumes/${resumeId}/skill-gaps`),
 
-  getResumeMarket: (resumeId: number) => request<ResumeMarket>(`/resumes/${resumeId}/market`),
+  /** `peers` — сколько ближайших вакансий учитывать (по умолчанию 100), `grade` — только этого грейда. */
+  getResumeMarket: (resumeId: number, opts?: { peers?: number; grade?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.peers) q.set("peers", String(opts.peers));
+    if (opts?.grade) q.set("grade", opts.grade);
+    const qs = q.toString();
+    return request<ResumeMarket>(`/resumes/${resumeId}/market${qs ? `?${qs}` : ""}`);
+  },
   getSkillWhatIf: (resumeId: number) => request<SkillWhatIf>(`/resumes/${resumeId}/what-if`),
   getCareerPaths: (resumeId: number) => request<CareerPaths>(`/resumes/${resumeId}/career-paths`),
 

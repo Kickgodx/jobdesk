@@ -110,6 +110,9 @@ async def test_tools_listed_with_schemas_and_hints(api_client):
     props = tools["search_vacancies"].input_schema["properties"]
     assert props["limit"]["maximum"] == 20
     assert "description" in props["roles"]
+    market = tools["resume_market"].input_schema["properties"]
+    assert {"peers", "grade"} <= set(market)
+    assert "peers" not in tools["resume_market"].input_schema.get("required", [])
 
 
 @pytest.mark.anyio

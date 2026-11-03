@@ -431,11 +431,20 @@ def build_server(client: ApiClient) -> MCPServer:
         return dumps({"id": r["id"], "name": r["name"], "text": truncate(r.get("text"), RESUME_TEXT_CHARS)})
 
     @mcp.tool(annotations=_READ, structured_output=False)
-    async def resume_market(resume_id: ResumeId) -> str:
+    async def resume_market(
+        resume_id: ResumeId,
+        peers: Annotated[
+            int | None,
+            Field(ge=10, le=500, description="Сколько ближайших вакансий учитывать (10–500, по умолчанию 100)."),
+        ] = None,
+        grade: Annotated[
+            str | None, Field(description="Только вакансии этого грейда (junior, middle, senior, lead…): рынок уровня.")
+        ] = None,
+    ) -> str:
         """Резюме и рынок: роли, грейды, вилка зарплат и частые технологии вакансий, ближайших
         к резюме по смыслу (с отметкой, есть ли технология в резюме)."""
         with _api_errors():
-            return dumps(await client.get(f"resumes/{resume_id}/market"))
+            return dumps(await client.get(f"resumes/{resume_id}/market", peers=peers, grade=grade))
 
     @mcp.tool(annotations=_READ, structured_output=False)
     async def resume_skill_gaps(resume_id: ResumeId) -> str:
