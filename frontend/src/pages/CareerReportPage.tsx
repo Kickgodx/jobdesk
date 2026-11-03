@@ -12,6 +12,7 @@ import type {
   VacancyListItem,
 } from "../types/api";
 import { formatThousands as k } from "../utils/formatSalary";
+import { loadResumeMarketPrefs } from "../utils/resumeMarketPrefs";
 
 function pct(v: number | null | undefined): string {
   return v == null ? "—" : `${Math.round(v * 100)}%`;
@@ -64,12 +65,17 @@ function Summary({
   paths?: CareerPaths;
 }) {
   const topRole = market?.specializations[0];
-  const topGrade = market?.grades[0];
+  const topGrade = market?.grade ? undefined : market?.grades[0];
   const bestSkill = whatIf?.options.find((o) => o.new_fit > 0) ?? whatIf?.options[0];
   const nextGrade = paths?.paths.find((p) => p.kind === "grade");
   const tiles: { value: string; label: string }[] = [];
   if (market?.median != null)
-    tiles.push({ value: `${k(market.median)} ₽`, label: "медиана зарплаты похожих вакансий" });
+    tiles.push({
+      value: `${k(market.median)} ₽`,
+      label: market.grade
+        ? `медиана зарплаты похожих вакансий ${market.grade}`
+        : "медиана зарплаты похожих вакансий",
+    });
   if (market?.coverage != null)
     tiles.push({ value: pct(market.coverage), label: "технологий похожих вакансий названо в резюме" });
   if (whatIf && whatIf.with_technologies > 0)
@@ -125,7 +131,8 @@ function MarketSection({ m }: { m: ResumeMarket }) {
   return (
     <>
       <p className="caption">
-        {m.peers} вакансий, ближайших к резюме по смыслу текста, за {months(m.window_days)} месяцев.
+        {m.peers} вакансий{m.grade ? ` грейда ${m.grade}` : ""}, ближайших к резюме по смыслу текста, за{" "}
+        {months(m.window_days)} месяцев.
       </p>
       <div className="report-columns">
         <div>
@@ -138,16 +145,18 @@ function MarketSection({ m }: { m: ResumeMarket }) {
             ))}
           </ul>
         </div>
-        <div>
-          <strong>Грейды</strong>
-          <ul className="report-list">
-            {m.grades.slice(0, 5).map((s) => (
-              <li key={s.name}>
-                {s.name} <span className="muted">{pct(s.share)}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+        {!m.grade && (
+          <div>
+            <strong>Грейды</strong>
+            <ul className="report-list">
+              {m.grades.slice(0, 5).map((s) => (
+                <li key={s.name}>
+                  {s.name} <span className="muted">{pct(s.share)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div>
           <strong>Зарплата</strong>
           {m.median != null ? (
@@ -349,9 +358,12 @@ export default function CareerReportPage() {
   );
   const opts = { staleTime: 60_000, retry: false as const, enabled: Number.isFinite(resumeId) };
   const resumesQ = useQuery({ queryKey: ["resumes"], queryFn: () => api.listResumes() });
+  // Та же выборка, что выбрана в «Резюме и рынок» на странице резюме.
+  const [marketPrefs] = useState(loadResumeMarketPrefs);
   const marketQ = useQuery({
-    queryKey: ["resume-market", resumeId],
-    queryFn: () => api.getResumeMarket(resumeId),
+    queryKey: ["resume-market", resumeId, marketPrefs.peers, marketPrefs.grade],
+    queryFn: () =>
+      api.getResumeMarket(resumeId, { peers: marketPrefs.peers, grade: marketPrefs.grade || undefined }),
     ...opts,
   });
   const whatIfQ = useQuery({
