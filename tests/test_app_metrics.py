@@ -30,6 +30,10 @@ def _sample(name: str, labels: dict[str, str]) -> float:
     return 0.0
 
 
+def _has_sample(name: str, labels: dict[str, str]) -> bool:
+    return any(s.name == name and s.labels == labels for family in REGISTRY.collect() for s in family.samples)
+
+
 def _register(client, email: str, password: str = "secret1") -> str:
     r = client.post("/api/v1/auth/register", json={"email": email, "password": password})
     assert r.status_code == 201, r.text
@@ -238,6 +242,9 @@ def test_db_parse_runs_finished_24h_counts_recent(api_client):
         session.close()
 
     assert _sample("db_parse_runs_finished_24h", {"status": "completed"}) >= 1
+    # Упавший прогон — двое суток назад: серия есть, но с нулём (иначе stat-панель — No data).
+    assert _has_sample("db_parse_runs_finished_24h", {"status": "failed"})
+    assert _sample("db_parse_runs_finished_24h", {"status": "failed"}) == 0
     assert _sample("db_parse_posts_fetched_24h", {}) >= 12
 
 
@@ -480,3 +487,92 @@ def test_single_process_metrics_use_global_registry(monkeypatch):
     assert observability.metrics_registry() is REGISTRY
     assert observability.start_pool_gauges() is None
     assert observability.collect_dead_process_metrics() == []
+
+
+def test_labelled_counters_have_zero_series_before_first_event():
+    """Первое событие после старта процесса видно в increase(): серия уже есть с нулём."""
+    for name, labels in (
+        ("hh_syncs_total", {"outcome": "success"}),
+        ("hh_details_total", {"result": "fetched"}),
+        ("auth_events_total", {"event": "login", "outcome": "success"}),
+        ("vacancy_match_calls_total", {"outcome": "success"}),
+        ("vacancy_import_items_total", {"status": "created"}),
+        ("llm_jobs_recover_total", {"from_status": "running"}),
+    ):
+        assert _has_sample(name, labels), (name, labels)
+
+
+def test_init_llm_job_series_covers_every_kind():
+    from backend import observability
+    from backend.services.llm_job_service import ALL_KINDS
+
+    observability.init_llm_job_series(ALL_KINDS, backend="rq")
+    for kind in ALL_KINDS:
+        assert _has_sample("llm_worker_jobs_total", {"kind": kind, "outcome": "done"})
+        assert _has_sample("llm_jobs_total", {"kind": kind, "outcome": "queued"})
+        assert _has_sample("llm_job_enqueue_total", {"backend": "rq", "kind": kind, "outcome": "queued"})
+
+
+def _fake_proc(root, pids):
+    """Каталог в формате /proc: btime и stat/limits/fd у каждого pid."""
+    root.mkdir()
+    (root / "stat").write_text("cpu 1 2 3\nbtime 1700000000\n", encoding="utf-8")
+    for pid in pids:
+        d = root / str(pid)
+        (d / "fd").mkdir(parents=True)
+        for fd in range(pid % 5 + 1):
+            (d / "fd" / str(fd)).write_text("", encoding="utf-8")
+        # Поля после ")": [11] utime, [12] stime, [19] starttime, [20] vsize, [21] rss (страниц).
+        fields = ["S"] + ["0"] * 25
+        fields[11], fields[12], fields[19], fields[20], fields[21] = "100", "50", "200", "4096", str(pid)
+        (d / "stat").write_text(f"{pid} (python) " + " ".join(fields), encoding="utf-8")
+        (d / "limits").write_text(
+            "Max open files            1024                 1024                 files\n", encoding="utf-8"
+        )
+
+
+def test_api_processes_collector_labels_every_live_process(tmp_path):
+    """Несколько процессов API: process_* каждого живого процесса — со своим pid."""
+    from backend.observability import _ApiProcessesCollector
+
+    mp_dir = tmp_path / "mp"
+    mp_dir.mkdir()
+    for name in ("counter_101.db", "gauge_livesum_102.db", "histogram_103.db", "junk.txt"):
+        (mp_dir / name).write_bytes(b"")
+    proc = tmp_path / "proc"
+    _fake_proc(proc, [101, 102])  # 103 умер: файлы счётчиков остались, /proc/103 нет
+
+    families = {f.name: f for f in _ApiProcessesCollector(str(mp_dir), proc=str(proc)).collect()}
+    rss = {s.labels["pid"]: s.value for s in families["process_resident_memory_bytes"].samples}
+    assert set(rss) == {"101", "102"}
+    assert rss["101"] > 0
+    fds = {s.labels["pid"]: s.value for s in families["process_open_fds"].samples}
+    assert fds == {"101": 2.0, "102": 3.0}
+    assert families["process_cpu_seconds"].type == "counter"
+
+
+def test_multiprocess_registry_exposes_gc_counters(tmp_path, monkeypatch):
+    """GC процессов API попадает в сумму multiprocess-метрик (GCCollector туда не входит)."""
+    import os
+    import subprocess
+    import sys
+
+    from prometheus_client import generate_latest
+
+    from backend import observability
+
+    child = (
+        "import gc, time\n"
+        "from backend.observability import start_pool_gauges\n"
+        "gc.collect()\n"
+        "stop = start_pool_gauges()\n"
+        "time.sleep(0.5)\n"
+        "stop.set()\n"
+    )
+    env = {**os.environ, "PROMETHEUS_MULTIPROC_DIR": str(tmp_path)}
+    subprocess.run([sys.executable, "-c", child], env=env, check=True, cwd=os.getcwd(), timeout=60)
+
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+    body = generate_latest(observability.metrics_registry()).decode()
+    line = next(x for x in body.splitlines() if x.startswith('python_gc_collections_total{generation="2"}'))
+    assert float(line.rsplit(" ", 1)[1]) >= 1

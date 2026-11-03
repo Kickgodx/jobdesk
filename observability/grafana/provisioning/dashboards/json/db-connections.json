@@ -54,7 +54,7 @@
       },
       "targets": [
         {
-          "expr": "sum(db_pool_checked_out{job=~\"jobdesk-backend|jobdesk-llm-worker\"})",
+          "expr": "sum(db_pool_checked_out{job=~\"jobdesk-backend|jobdesk-.+-worker\"})",
           "legendFormat": "checked out",
           "refId": "A"
         }
@@ -87,7 +87,7 @@
       },
       "targets": [
         {
-          "expr": "sum(db_pool_checked_in{job=~\"jobdesk-backend|jobdesk-llm-worker\"})",
+          "expr": "sum(db_pool_checked_in{job=~\"jobdesk-backend|jobdesk-.+-worker\"})",
           "legendFormat": "checked in",
           "refId": "A"
         }
@@ -120,7 +120,7 @@
       },
       "targets": [
         {
-          "expr": "sum(db_pool_max_connections{job=~\"jobdesk-backend|jobdesk-llm-worker\"})",
+          "expr": "sum(db_pool_max_connections{job=~\"jobdesk-backend|jobdesk-.+-worker\"})",
           "legendFormat": "max",
           "refId": "A"
         }
@@ -157,7 +157,7 @@
       },
       "targets": [
         {
-          "expr": "sum(db_pool_overflow{job=~\"jobdesk-backend|jobdesk-llm-worker\"})",
+          "expr": "sum(db_pool_overflow{job=~\"jobdesk-backend|jobdesk-.+-worker\"})",
           "legendFormat": "overflow",
           "refId": "A"
         }
@@ -245,22 +245,22 @@
       },
       "targets": [
         {
-          "expr": "db_pool_checked_out{job=~\"jobdesk-backend|jobdesk-llm-worker\"}",
+          "expr": "db_pool_checked_out{job=~\"jobdesk-backend|jobdesk-.+-worker\"}",
           "legendFormat": "{{job}} checked_out",
           "refId": "A"
         },
         {
-          "expr": "db_pool_checked_in{job=~\"jobdesk-backend|jobdesk-llm-worker\"}",
+          "expr": "db_pool_checked_in{job=~\"jobdesk-backend|jobdesk-.+-worker\"}",
           "legendFormat": "{{job}} checked_in",
           "refId": "B"
         },
         {
-          "expr": "db_pool_overflow{job=~\"jobdesk-backend|jobdesk-llm-worker\"}",
+          "expr": "db_pool_overflow{job=~\"jobdesk-backend|jobdesk-.+-worker\"}",
           "legendFormat": "{{job}} overflow",
           "refId": "C"
         },
         {
-          "expr": "db_pool_max_connections{job=~\"jobdesk-backend|jobdesk-llm-worker\"}",
+          "expr": "db_pool_max_connections{job=~\"jobdesk-backend|jobdesk-.+-worker\"}",
           "legendFormat": "{{job}} max",
           "refId": "D"
         }
@@ -287,7 +287,7 @@
       },
       "targets": [
         {
-          "expr": "db_pool_checked_out{job=~\"jobdesk-backend|jobdesk-llm-worker\"} / clamp_min(db_pool_max_connections{job=~\"jobdesk-backend|jobdesk-llm-worker\"}, 1)",
+          "expr": "db_pool_checked_out{job=~\"jobdesk-backend|jobdesk-.+-worker\"} / clamp_min(db_pool_max_connections{job=~\"jobdesk-backend|jobdesk-.+-worker\"}, 1)",
           "legendFormat": "{{job}} util",
           "refId": "A"
         }

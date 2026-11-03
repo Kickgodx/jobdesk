@@ -14,8 +14,9 @@ overflow / лимит). Регистрируется и на backend, и на ll
 Несколько процессов API (``API_WORKERS`` > 1) пишут метрики в каталог
 ``PROMETHEUS_MULTIPROC_DIR`` (multiprocess-режим prometheus_client), лидер отдаёт
 их сумму (``metrics_registry``). У gauge'ей поэтому задан ``multiprocess_mode``;
-пул БД в этом режиме публикуют gauge'и ``livesum`` (``start_pool_gauges``), а
-файлы умерших процессов убирает ``collect_dead_process_metrics``.
+пул БД и GC в этом режиме публикует ``start_pool_gauges``, ``process_*`` всех
+процессов (лейбл ``pid``) — ``_ApiProcessesCollector``, а файлы умерших процессов
+убирает ``collect_dead_process_metrics``.
 """
 
 from __future__ import annotations
@@ -101,7 +102,8 @@ VACANCY_ARCHIVED = Counter(
 
 # Нули для известных лейблов: иначе первый прирост серии не виден increase()/rate()
 # (см. jobdesk/observability/parse_metrics.py).
-for _status in ("completed", "partial", "failed", "cancelled"):
+_FINISHED_RUN_STATUSES = ("completed", "partial", "failed", "cancelled")
+for _status in _FINISHED_RUN_STATUSES:
     PARSE_RUNS.labels(status=_status)
 for _result in ("inserted", "updated"):
     VACANCY_UPSERTS.labels(result=_result)
@@ -384,6 +386,49 @@ def record_hh_listings_purged(count: int) -> None:
         HH_LISTINGS_PURGED.inc(count)
 
 
+# Нули для известных лейблов (как у PARSE_RUNS выше): серия, появившаяся сразу с 1,
+# для increase()/rate() — прирост 0, и первое событие после старта процесса не видно.
+for _status in ("created", "exists", "not_vacancy", "error"):
+    IMPORT_ITEMS.labels(status=_status)
+for _outcome in ("success", "cached", "error"):
+    MATCH_CALLS.labels(outcome=_outcome)
+    COVER_LETTER_CALLS.labels(outcome=_outcome)
+for _event, _outcomes in (
+    ("register", ("success", "conflict", "closed", "rate_limited")),
+    ("login", ("success", "invalid", "disabled", "rate_limited")),
+    ("refresh", ("success", "invalid")),
+    ("change_password", ("success", "invalid")),
+    ("logout_all", ("success",)),
+    ("token_create", ("success",)),
+    ("token_revoke", ("success",)),
+):
+    for _outcome in _outcomes:
+        AUTH_EVENTS.labels(event=_event, outcome=_outcome)
+for _status in ("running", "queued"):
+    LLM_JOBS_RECOVER.labels(from_status=_status)
+    PARSE_JOBS_RECOVER.labels(from_status=_status)
+for _outcome in ("success", "cancelled", "api_error", "not_configured", "error"):
+    HH_SYNCS.labels(outcome=_outcome)
+for _result in ("fetched", "skipped"):
+    HH_DETAILS.labels(result=_result)
+
+
+def init_llm_job_series(kinds, *, backend: str | None = None) -> None:
+    """Нулевые серии LLM-джоб по видам — на старте процесса, который их ставит или исполняет.
+
+    Виды живут в ``backend.services.llm_job_service`` (импорт оттуда сюда — цикл), поэтому
+    передаются вызывающим. ``backend`` (inprocess | rq) — лейбл постановки, только у API.
+    """
+    for kind in kinds:
+        for outcome in ("queued", "done", "error", "cancelled"):
+            LLM_JOB_CALLS.labels(outcome=outcome, kind=kind)
+        for outcome in ("started", "done", "error", "cancelled"):
+            LLM_WORKER_JOBS.labels(kind=kind, outcome=outcome)
+        if backend:
+            for outcome in ("queued", "reused"):
+                LLM_JOB_ENQUEUE.labels(backend=backend, kind=kind, outcome=outcome)
+
+
 # --- Пул соединений SQLAlchemy -----------------------------------------------
 
 
@@ -587,8 +632,9 @@ class _DBStatsCollector:
             "Прогоны с finished_at за последние 24 ч",
             labels=["status"],
         )
-        for status, n in runs_finished_24h.items():
-            fam.add_metric([status], n)
+        # Нули для завершающих статусов: без серии stat-панель «Упало за 24 ч» — No data, а не 0.
+        for status in sorted(set(_FINISHED_RUN_STATUSES) | set(runs_finished_24h)):
+            fam.add_metric([status], runs_finished_24h.get(status, 0))
         yield fam
 
         yield GaugeMetricFamily(
@@ -796,25 +842,99 @@ def metrics_registry():
 
     registry = CollectorRegistry()
     MultiProcessCollector(registry, path=path)
+    registry.register(_ApiProcessesCollector(path))
     if _db_stats_registered:
         registry.register(_DBStatsCollector())
     return registry
 
 
+def _pids_in_multiprocess_dir(path: str) -> set[int]:
+    """pid из имён файлов каталога (``counter_<pid>.db``, ``gauge_livesum_<pid>.db``…)."""
+    pids: set[int] = set()
+    for name in os.listdir(path):
+        if not name.endswith(".db"):
+            continue
+        try:
+            pids.add(int(name[: -len(".db")].rsplit("_", 1)[1]))
+        except (IndexError, ValueError):
+            continue
+    return pids
+
+
+class _ApiProcessesCollector:
+    """``process_*`` всех живых процессов API с лейблом ``pid``.
+
+    ``MultiProcessCollector`` метрик процесса не отдаёт, а ``ProcessCollector`` видит только
+    тот процесс, что обслуживает scrape. Процессы берутся из файлов каталога метрик; живой —
+    тот, у кого есть ``/proc/<pid>`` (вне Linux ``/proc`` нет — метрик тоже).
+    """
+
+    def __init__(self, path: str, proc: str = "/proc") -> None:
+        self._path = path
+        self._proc = proc
+
+    def collect(self):
+        from prometheus_client import ProcessCollector
+        from prometheus_client.metrics_core import Metric
+
+        try:
+            pids = _pids_in_multiprocess_dir(self._path)
+        except OSError:
+            pids = set()
+        pids.add(os.getpid())
+        merged: dict[str, Metric] = {}
+        for pid in sorted(pids):
+            if not os.path.isdir(os.path.join(self._proc, str(pid))):
+                continue
+            collector = ProcessCollector(pid=lambda pid=pid: pid, proc=self._proc, registry=None)
+            for family in collector.collect():
+                out = merged.setdefault(family.name, Metric(family.name, family.documentation, family.type))
+                for s in family.samples:
+                    out.add_sample(s.name, {**s.labels, "pid": str(pid)}, s.value)
+        yield from merged.values()
+
+
 def start_pool_gauges() -> threading.Event | None:
-    """Пул БД процесса в multiprocess-метрики (``livesum``) раз в 10 с; без multiprocess — None.
+    """Пул БД и GC процесса в multiprocess-метрики раз в 10 с; без multiprocess — None.
 
     ``_DBPoolCollector`` читает пул на scrape, но scrape обслуживает один процесс:
     пулы остальных он не видит. Gauge'и не регистрируются в ``REGISTRY`` — там те же
     имена отдаёт коллектор; в multiprocess-режиме значения уходят в файлы каталога.
+    ``python_gc_*`` — по той же причине: ``GCCollector`` в сумму процессов не попадает,
+    поэтому каждый процесс докидывает прирост ``gc.get_stats()`` в свои счётчики.
     """
     if multiprocess_dir() is None:
         return None
+    import gc
+
     gauges = {
         key: Gauge(f"db_pool_{key}", help_text, registry=None, multiprocess_mode="livesum")
         for key, help_text in _POOL_GAUGE_HELP.items()
     }
+    gc_counters = {
+        "collections": Counter(
+            "python_gc_collections", "Сборки GC по поколениям", labelnames=("generation",), registry=None
+        ),
+        "collected": Counter(
+            "python_gc_objects_collected", "Объектов собрано GC", labelnames=("generation",), registry=None
+        ),
+        "uncollectable": Counter(
+            "python_gc_objects_uncollectable",
+            "Несобираемых объектов, найденных GC",
+            labelnames=("generation",),
+            registry=None,
+        ),
+    }
+    gc_seen: dict[tuple[str, int], int] = {}
     stop = threading.Event()
+
+    def _tick_gc() -> None:
+        for gen, stats in enumerate(gc.get_stats()):
+            for key, counter in gc_counters.items():
+                value = int(stats.get(key, 0))
+                delta = value - gc_seen.get((key, gen), 0)
+                gc_seen[(key, gen)] = value
+                counter.labels(generation=str(gen)).inc(max(delta, 0))
 
     def _loop() -> None:
         while True:
@@ -822,6 +942,7 @@ def start_pool_gauges() -> threading.Event | None:
             if stats is not None:
                 for key, gauge in gauges.items():
                     gauge.set(stats[key])
+            _tick_gc()
             if stop.wait(timeout=_POOL_GAUGE_INTERVAL_S):
                 return
 
