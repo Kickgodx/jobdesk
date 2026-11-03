@@ -3,6 +3,12 @@ import { useState } from "react";
 import { ApiError, api } from "../api/client";
 import type { MarketShare } from "../types/api";
 import { formatThousands as k } from "../utils/formatSalary";
+import {
+  loadResumeMarketPrefs,
+  PEER_OPTIONS,
+  type ResumeMarketPrefs,
+  saveResumeMarketPrefs,
+} from "../utils/resumeMarketPrefs";
 import { SalaryStrip } from "./MarketSalaryBlock";
 
 function pct(share: number): string {
@@ -13,14 +19,15 @@ function shares(items: MarketShare[]): string {
   return items.map((s) => `${s.name} (${pct(s.share)})`).join(", ");
 }
 
-/** Сколько ближайших вакансий можно учитывать: больше — шире рынок, но дальше от резюме. */
-const PEER_OPTIONS = [50, 100, 200, 300, 500];
-const DEFAULT_PEERS = 100;
-
 /** «Резюме и рынок»: что платят и что требуют в вакансиях, ближайших к резюме по смыслу. */
 export default function ResumeMarketPanel({ resumeId }: { resumeId: number }) {
-  const [peers, setPeers] = useState(DEFAULT_PEERS);
-  const [grade, setGrade] = useState("");
+  const [prefs, setPrefs] = useState(loadResumeMarketPrefs);
+  const { peers, grade } = prefs;
+  const update = (patch: Partial<ResumeMarketPrefs>) => {
+    const next = { ...prefs, ...patch };
+    setPrefs(next);
+    saveResumeMarketPrefs(next);
+  };
   const defaultsQ = useQuery({ queryKey: ["config-defaults"], queryFn: () => api.getConfigDefaults() });
   const gradeOptions = (defaultsQ.data?.grade_options ?? []).filter((g) => g !== "unknown");
   const q = useQuery({
@@ -38,7 +45,7 @@ export default function ResumeMarketPanel({ resumeId }: { resumeId: number }) {
       <div className="filters-panel">
         <label title="Больше вакансий — устойчивее доли, но в выборку попадают менее похожие на резюме">
           Вакансий{" "}
-          <select value={peers} onChange={(e) => setPeers(Number(e.target.value))}>
+          <select value={peers} onChange={(e) => update({ peers: Number(e.target.value) })}>
             {PEER_OPTIONS.map((n) => (
               <option key={n} value={n}>
                 {n}
@@ -48,7 +55,7 @@ export default function ResumeMarketPanel({ resumeId }: { resumeId: number }) {
         </label>
         <label title="Только вакансии выбранного грейда: что платят и требуют на этом уровне">
           Грейд{" "}
-          <select value={grade} onChange={(e) => setGrade(e.target.value)}>
+          <select value={grade} onChange={(e) => update({ grade: e.target.value })}>
             <option value="">Все</option>
             {gradeOptions.map((g) => (
               <option key={g} value={g}>

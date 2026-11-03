@@ -86,11 +86,22 @@ SPECIALIZATION_ALIASES: dict[str, str] = {
 }
 
 
+# Грейд в начале роли («Senior QA», «Middle+ Backend») — это грейд, а не роль. Lead / Head не
+# срезаются: «Team Lead», «QA Lead», «Head of Engineering» — отдельные управленческие роли.
+# Тот же шаблон — в миграции 053_strip_grade_from_roles.
+_GRADE_PREFIX = re.compile(r"^(?:senior|middle|junior|sr\.?|jr\.?|mid|сеньор|мидл|джун(?:иор)?)\+?\s+(?=\S)", re.I)
+
+
+def strip_grade_prefix(name: str) -> str:
+    """«Senior QA» → «QA»; имя из одного грейда («Senior») не меняется."""
+    return _GRADE_PREFIX.sub("", name, count=1).strip() or name
+
+
 def canonical_specializations(names: list[str]) -> list[str]:
-    """Имена через ``SPECIALIZATION_ALIASES``, без повторов, порядок сохраняется."""
+    """Имена без грейда в начале, через ``SPECIALIZATION_ALIASES``, без повторов, порядок сохраняется."""
     out: list[str] = []
     for raw in names:
-        name = raw.strip()
+        name = strip_grade_prefix(raw.strip())
         name = SPECIALIZATION_ALIASES.get(name, name)
         if name and name not in out:
             out.append(name)
@@ -443,7 +454,7 @@ def split_specializations(
     moved: list[str] = []
     developer = False
     for raw in specializations:
-        name = str(raw).strip()
+        name = strip_grade_prefix(str(raw).strip())
         if not name:
             continue
         techs, is_dev = _technologies_in_spec(name)
