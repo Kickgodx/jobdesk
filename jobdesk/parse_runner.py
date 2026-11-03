@@ -11,7 +11,7 @@ from collections import deque
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -73,6 +73,33 @@ if TYPE_CHECKING:
 _LOG = get_logger(__name__)
 _TRACER = trace.get_tracer(__name__)
 
+# Сколько каналов с наибольшим числом пропущенных постов показывать в итоге прогона.
+TOP_SKIPPED_CHANNELS_LIMIT = 5
+
+
+class SkippedChannel(TypedDict):
+    channel: str
+    posts: int
+    skipped: int
+
+
+def top_skipped_channels(
+    posts_by_channel: dict[str, int],
+    skipped_by_channel: dict[str, int],
+    *,
+    limit: int = TOP_SKIPPED_CHANNELS_LIMIT,
+) -> list[SkippedChannel]:
+    """Каналы с наибольшим числом пропущенных постов (не стали вакансией после фильтров).
+
+    Порядок — по числу пропусков, при равенстве — по доле пропусков, затем по имени.
+    Каналы без пропусков не попадают: список подсказывает, какие источники мусорные.
+    """
+    rows = [
+        (ch, posts_by_channel.get(ch, skipped), skipped) for ch, skipped in skipped_by_channel.items() if skipped > 0
+    ]
+    rows.sort(key=lambda r: (-r[2], -r[2] / max(1, r[1]), r[0]))
+    return [SkippedChannel(channel=ch, posts=posts, skipped=skipped) for ch, posts, skipped in rows[:limit]]
+
 
 def _channel_parser(
     config: AppConfig,
@@ -112,6 +139,7 @@ def _build_parse_result(
     channel_checkpoints: dict[str, ChannelCheckpoint] | None = None,
     total_elapsed_sec: float | None = None,
     forwarded_posts: list[ForwardedPost] | None = None,
+    skipped_channels: list[SkippedChannel] | None = None,
 ) -> ParseResult:
     _LOG.info(
         "Дедупликация: %s уникальных, %s дубликатов за %.1f с.",
@@ -161,6 +189,9 @@ def _build_parse_result(
         "posts_processed": posts_processed,
         "posts_skipped": posts_skipped,
         "vacancy_candidates": len(candidates),
+        "top_skipped_channels": skipped_channels or [],
+        # Посты, потерянные из-за LLM, неотличимы от мусора: список тогда лишь оценка.
+        "top_skipped_channels_incomplete": _llm_posts_lost(config, ai_service),
     }
     if ai_service is not None:
         run_params["ai_stats"] = ai_service.stats.to_dict(
@@ -461,6 +492,9 @@ def run_parse(
     channels_fetched = 0
     candidates: list[Vacancy] = []
     forwarded: list[ForwardedPost] = []
+    # Разобранные и пропущенные (не ставшие кандидатом) посты по каналам — для итога прогона.
+    posts_by_channel: dict[str, int] = {}
+    skipped_by_channel: dict[str, int] = {}
     batch_step = progress_every_n_posts or config.parser.progress_batch_posts
 
     channels_unique: list[str] = []
@@ -661,6 +695,11 @@ def run_parse(
             nonlocal posts_processed
             posts_processed += 1
             record_post_processed(candidate=v is not None)
+            # После отмены разбор возвращает None, не глядя на пост — это не пропуск канала.
+            if v is not None or cancel is None or not cancel.is_cancelled():
+                posts_by_channel[ch] = posts_by_channel.get(ch, 0) + 1
+                if v is None:
+                    skipped_by_channel[ch] = skipped_by_channel.get(ch, 0) + 1
             src = post.forward_from
             if src is not None and src.username != ch.lower():
                 forwarded.append(
@@ -825,6 +864,7 @@ def run_parse(
             channel_checkpoints=new_checkpoints,
             total_elapsed_sec=time.monotonic() - run_started,
             forwarded_posts=forwarded,
+            skipped_channels=top_skipped_channels(posts_by_channel, skipped_by_channel),
         )
     except ParseCancelled:
         _LOG.warning("Прогон прерван (отмена).")
@@ -849,6 +889,7 @@ def run_parse(
             fx_rates=fx_rates,
             total_elapsed_sec=time.monotonic() - run_started,
             forwarded_posts=forwarded,
+            skipped_channels=top_skipped_channels(posts_by_channel, skipped_by_channel),
         )
     except KeyboardInterrupt:
         if cancel is not None:

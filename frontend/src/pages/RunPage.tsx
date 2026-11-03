@@ -118,6 +118,35 @@ function RunTimingSummary({
   );
 }
 
+/** Каналы, где больше всего постов не стали вакансией: кандидаты на удаление из источников. */
+function SkippedChannels({ runParams }: { runParams?: Record<string, unknown> | null }) {
+  const summary = parseSummaryFromRunParams(runParams);
+  const rows = Array.isArray(summary?.top_skipped_channels) ? summary.top_skipped_channels : [];
+  if (!rows.length) return null;
+  return (
+    <div className="skipped-stats">
+      <h4>Больше всего пропусков</h4>
+      <ul className="skipped-channels">
+        {rows.map((r) => (
+          <li key={r.channel}>
+            <a href={`https://t.me/${encodeURIComponent(r.channel)}`} target="_blank" rel="noreferrer">
+              @{r.channel}
+            </a>{" "}
+            — пропущено <strong>{r.skipped.toLocaleString()}</strong> из {r.posts.toLocaleString()} (
+            {Math.round((100 * r.skipped) / Math.max(1, r.posts))}%)
+          </li>
+        ))}
+      </ul>
+      <p className="caption">Пропущен — пост, который не стал вакансией после разбора и фильтров прогона.</p>
+      {summary?.top_skipped_channels_incomplete && (
+        <p className="caption warning">
+          Часть постов не разобрана из-за LLM и тоже учтена как пропуск — список приблизительный.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function RunPage() {
   const { runId } = useParams<{ runId: string }>();
   const qc = useQueryClient();
@@ -327,6 +356,7 @@ export default function RunPage() {
                   Постов: {run.data.posts_fetched}; уникальных: {run.data.metrics.unique_vacancies};
                   дубликатов: {run.data.metrics.duplicate_count}
                 </p>
+                <SkippedChannels runParams={run.data.run_params} />
                 <AiStats runParams={run.data.run_params} />
                 <div className="export-links">
                   <button

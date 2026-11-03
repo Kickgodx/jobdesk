@@ -20,6 +20,16 @@ export interface ParseSummary {
   posts_processed?: number;
   posts_skipped?: number;
   vacancy_candidates?: number;
+  /** Каналы с наибольшим числом постов, не ставших вакансией (по убыванию пропусков). */
+  top_skipped_channels?: SkippedChannel[];
+  /** Часть постов потеряна из-за LLM и учтена как пропуск — список приблизительный. */
+  top_skipped_channels_incomplete?: boolean;
+}
+
+export interface SkippedChannel {
+  channel: string;
+  posts: number;
+  skipped: number;
 }
 
 export function parseSummaryFromRunParams(

@@ -396,3 +396,85 @@ def test_long_window_keeps_newest_days_and_warns(monkeypatch):
 
     assert "2026-09-20" in (result.parse_warnings or "")
     assert "2026-10-19" in (result.parse_warnings or "")
+
+
+def _junk(ch: str, i: int) -> RawPost:
+    return RawPost(
+        channel_username=ch,
+        post_id=f"junk{i}",
+        text=f"Розыгрыш призов #{i}, подписывайтесь на канал!",
+        post_date=datetime.now(UTC),
+        post_url=f"https://t.me/{ch}/junk{i}",
+    )
+
+
+def test_summary_lists_channels_with_most_skipped_posts(monkeypatch):
+    posts = {
+        "alpha": [_post("alpha", 1), _junk("alpha", 1)],
+        "beta": [_junk("beta", i) for i in range(3)],
+        "gamma": [_post("gamma", 1)],
+    }
+    _install(monkeypatch, _StreamingParser(posts))
+    cfg = _config(channels=list(posts), vacancy_score_threshold=20)
+
+    result = parse_runner.run_parse(cfg)
+
+    summary = result.run_params["parse_summary"]
+    assert summary["top_skipped_channels"] == [
+        {"channel": "beta", "posts": 3, "skipped": 3},
+        {"channel": "alpha", "posts": 2, "skipped": 1},
+    ]
+    assert summary["top_skipped_channels_incomplete"] is False
+
+
+def test_cancelled_run_keeps_skipped_channels_without_cancelled_posts(monkeypatch):
+    cancel = ParseCancellationToken()
+    alpha_done = threading.Event()
+
+    def before_next(ch):
+        alpha_done.wait(timeout=5)  # alpha разобран целиком — отмена приходит до beta
+        cancel.request_cancel()
+
+    posts = {"alpha": [_junk("alpha", i) for i in range(2)], "beta": [_junk("beta", 1)]}
+    _install(monkeypatch, _StreamingParser(posts, before_next=before_next))
+
+    result = parse_runner.run_parse(
+        _config(channels=list(posts), vacancy_score_threshold=20),
+        cancel=cancel,
+        checkpoint_sink=lambda cps: alpha_done.set(),
+    )
+
+    # beta уже не разбирался — его посты не засчитаны пропуском.
+    assert result.run_params["parse_summary"]["top_skipped_channels"] == [
+        {"channel": "alpha", "posts": 2, "skipped": 2}
+    ]
+
+
+def test_skipped_channels_marked_incomplete_when_llm_lost_posts(monkeypatch):
+    posts = [_post("alpha", i) for i in range(5)]
+
+    result, _ = _run_primary_with_limit(monkeypatch, limit=2, posts=posts, cached=set())
+
+    summary = result.run_params["parse_summary"]
+    assert summary["top_skipped_channels"] == [{"channel": "alpha", "posts": 5, "skipped": 3}]
+    assert summary["top_skipped_channels_incomplete"] is True
+
+
+def test_top_skipped_channels_orders_by_count_then_ratio_then_name():
+    posts = {"a": 10, "b": 4, "c": 4, "d": 1, "e": 9, "f": 9, "g": 3, "h": 4}
+    skipped = {"a": 4, "b": 4, "c": 2, "d": 0, "e": 3, "f": 2, "g": 2, "h": 2}
+
+    top = parse_runner.top_skipped_channels(posts, skipped, limit=10)
+
+    # b и a — по 4 пропуска, у b доля выше; среди двух пропусков g (2/3) выше c и h (2/4),
+    # c и h равны — по имени; f (2/9) последний; d без пропусков не попадает.
+    assert [r["channel"] for r in top] == ["b", "a", "e", "g", "c", "h", "f"]
+    assert top[0] == {"channel": "b", "posts": 4, "skipped": 4}
+
+
+def test_top_skipped_channels_limit():
+    skipped = {f"ch{i}": i + 1 for i in range(8)}
+
+    top = parse_runner.top_skipped_channels(dict(skipped), skipped)
+
+    assert [r["channel"] for r in top] == ["ch7", "ch6", "ch5", "ch4", "ch3"]
