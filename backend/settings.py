@@ -6,10 +6,12 @@ import ipaddress
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Self
-from urllib.parse import quote
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from jobdesk_platform.db import default_database_url, require_postgres_url
+from jobdesk_platform.service_tokens import DEV_CORE_INTERNAL_TOKEN, DEV_HH_SERVICE_TOKEN, resolve_service_token
 
 _APP_ENV_ALIASES = {"": "dev", "development": "dev", "local": "dev", "production": "prod"}
 _MIN_JWT_SECRET_LENGTH = 32
@@ -96,9 +98,14 @@ class Settings(BaseSettings):
         ),
         alias="HTTP_LOG_EXCLUDE_PATHS",
     )
-    # HH.ru: готовый Bearer-токен (без client_credentials). Email — для User-Agent.
-    hh_api_token: str | None = Field(default=None, alias="HH_API_TOKEN")
-    hh_contact_email: str | None = Field(default=None, alias="HH_CONTACT_EMAIL")
+    # Внутренний API ядра (/internal/v1): токен, который ядро принимает от сервисов.
+    # Пусто → dev-значение (одинаковое у сервисов), в prod — обязателен (см. _apply_app_env).
+    core_internal_token: str | None = Field(default=None, alias="CORE_INTERNAL_TOKEN")
+    # HH-сервис (jobdesk_hh): адрес, токен, которым ядро его вызывает, и тайм-аут запроса.
+    # Пустой адрес — HH не подключён: /api/v1/hh/* отвечают 503 UPSTREAM_UNAVAILABLE.
+    hh_service_url: str | None = Field(default=None, alias="HH_SERVICE_URL")
+    hh_service_token: str | None = Field(default=None, alias="HH_SERVICE_TOKEN")
+    hh_service_timeout_seconds: float = Field(default=10.0, gt=0, alias="HH_SERVICE_TIMEOUT_SECONDS")
 
     # LLM jobs: inprocess (ThreadPool в API) или rq (Redis Queue + llm-worker).
     llm_job_backend: JobBackend = Field(default="inprocess", alias="LLM_JOB_BACKEND")
@@ -124,15 +131,6 @@ class Settings(BaseSettings):
     parse_job_max_attempts: int = Field(default=3, ge=1, alias="PARSE_JOB_MAX_ATTEMPTS")
     llm_job_max_attempts: int = Field(default=2, ge=1, alias="LLM_JOB_MAX_ATTEMPTS")
 
-    # HH sync jobs: inprocess (поток в API) или rq (Redis Queue + hh-worker).
-    hh_sync_job_backend: JobBackend = Field(default="inprocess", alias="HH_SYNC_JOB_BACKEND")
-    hh_worker_metrics_port: int = Field(default=9103, alias="HH_WORKER_METRICS_PORT")
-    hh_sync_rq_job_timeout_seconds: int = Field(default=3600, alias="HH_SYNC_RQ_JOB_TIMEOUT_SECONDS")
-    hh_sync_job_lease_seconds: int = Field(default=120, alias="HH_SYNC_JOB_LEASE_SECONDS")
-    hh_sync_job_stuck_minutes: int = Field(default=15, alias="HH_SYNC_JOB_STUCK_MINUTES")
-    # Sync безопасно повторять (detail уже скачанных listings не перекачивается).
-    hh_sync_job_max_attempts: int = Field(default=2, ge=1, alias="HH_SYNC_JOB_MAX_ATTEMPTS")
-
     # Фоновое обслуживание каталога (индексация эмбеддингов, оценки зарплат, обзор и карта
     # рынка; backend/maintenance.py): inprocess — потоки лидера API (локальный запуск, тесты),
     # worker — отдельный процесс jobdesk-maintenance-worker, API этим не занимается.
@@ -152,9 +150,7 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         return _APP_ENV_ALIASES.get(normalized, normalized)
 
-    @field_validator(
-        "llm_job_backend", "parse_job_backend", "hh_sync_job_backend", "maintenance_backend", mode="before"
-    )
+    @field_validator("llm_job_backend", "parse_job_backend", "maintenance_backend", mode="before")
     @classmethod
     def _normalize_job_backend(cls, value: Any) -> Any:
         # Другое значение отклоняет Literal: опечатка не должна молча включать inprocess.
@@ -167,13 +163,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _apply_app_env(self) -> Self:
         if not self.database_url.strip():
-            # 127.0.0.1, а не localhost: compose публикует порт только на IPv4-loopback, а
-            # localhost сначала резолвится в ::1 — на Windows psycopg ждёт там весь connect timeout.
-            password = quote(self.postgres_password or "tgjobs", safe="")
-            self.database_url = f"postgresql+psycopg://tgjobs:{password}@127.0.0.1:5432/tgjobs"
-        if not self.database_url.startswith("postgresql"):
-            # SQL, блокировки и миграции написаны только под Postgres.
-            raise ValueError("DATABASE_URL: поддерживается только PostgreSQL (postgresql+psycopg://…)")
+            self.database_url = default_database_url(self.postgres_password)
+        require_postgres_url(self.database_url)
         if self.auth_registration_open is None:
             self.auth_registration_open = not self.is_production
         if self.http_log_bodies is None:
@@ -184,6 +175,20 @@ class Settings(BaseSettings):
             # Эфемерный секрет допустим только в dev: в prod он сбрасывает сессии при
             # каждом рестарте и расходится между процессами.
             raise ValueError(f"APP_ENV=prod: задайте JWT_SECRET не короче {_MIN_JWT_SECRET_LENGTH} символов")
+        self.core_internal_token = resolve_service_token(
+            self.core_internal_token,
+            env_name="CORE_INTERNAL_TOKEN",
+            is_production=self.is_production,
+            dev_default=DEV_CORE_INTERNAL_TOKEN,
+        )
+        if (self.hh_service_url or "").strip() or not self.is_production:
+            # Токен HH нужен, только если ядро ходит в HH-сервис.
+            self.hh_service_token = resolve_service_token(
+                self.hh_service_token,
+                env_name="HH_SERVICE_TOKEN",
+                is_production=self.is_production,
+                dev_default=DEV_HH_SERVICE_TOKEN,
+            )
         return self
 
     @property
@@ -205,10 +210,6 @@ class Settings(BaseSettings):
     @property
     def parse_job_backend_normalized(self) -> JobBackend:
         return self.parse_job_backend
-
-    @property
-    def hh_sync_job_backend_normalized(self) -> JobBackend:
-        return self.hh_sync_job_backend
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -268,7 +269,6 @@ def check_api_workers(settings: Settings) -> None:
     for name, backend in (
         ("PARSE_JOB_BACKEND", settings.parse_job_backend),
         ("LLM_JOB_BACKEND", settings.llm_job_backend),
-        ("HH_SYNC_JOB_BACKEND", settings.hh_sync_job_backend),
     ):
         if backend != "rq":
             missing.append(f"{name}=rq")

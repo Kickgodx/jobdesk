@@ -4,7 +4,8 @@
 # Тесты правил — observability/alerts/tests/, запуск — scripts/check_alerts.sh.
 #
 # job="jobdesk-backend" в выражениях: стенд нагрузочного теста (job="jobdesk-loadtest")
-# отдаёт те же метрики API, и его перегружают намеренно.
+# отдаёт те же метрики API, и его перегружают намеренно. Задачи HH sync считает HH-сервис
+# (job="jobdesk-hh-service"), остальные — backend.
 
 groups:
   - name: jobdesk-jobs
@@ -12,7 +13,7 @@ groups:
       - alert: JobLeaseExpired
         # Recover идёт раз в JOB_RECOVER_INTERVAL_SECONDS (60 с): 5 минут с истёкшим
         # lease — recover не работает (воркер мёртв или не поднимает задачи).
-        expr: max by (kind) (db_jobs_lease_expired{job="jobdesk-backend"}) > 0
+        expr: max by (kind) (db_jobs_lease_expired{job=~"jobdesk-backend|jobdesk-hh-service"}) > 0
         for: 5m
         labels:
           severity: critical
@@ -97,7 +98,7 @@ groups:
       - alert: TargetDown
         # Ловит и остановленный воркер: Docker DNS на имя остановленного контейнера отвечает
         # ошибкой, и DNS SD при ошибке держит прежний адрес — цель остаётся с up == 0.
-        expr: up{job=~"jobdesk-backend|jobdesk-llm-worker|jobdesk-parse-worker|jobdesk-hh-worker|jobdesk-maintenance-worker"} == 0
+        expr: up{job=~"jobdesk-backend|jobdesk-llm-worker|jobdesk-parse-worker|jobdesk-hh-service|jobdesk-hh-worker|jobdesk-maintenance-worker"} == 0
         for: 5m
         labels:
           severity: critical
@@ -111,6 +112,7 @@ groups:
         expr: |
           absent(up{job="jobdesk-llm-worker"})
           or absent(up{job="jobdesk-parse-worker"})
+          or absent(up{job="jobdesk-hh-service"})
           or absent(up{job="jobdesk-hh-worker"})
           or absent(up{job="jobdesk-maintenance-worker"})
         for: 5m

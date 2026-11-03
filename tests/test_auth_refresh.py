@@ -216,6 +216,7 @@ def test_cookie_secure_in_prod_settings(monkeypatch):
     from backend.settings import Settings
 
     monkeypatch.delenv("REFRESH_COOKIE_SECURE", raising=False)
-    assert Settings(APP_ENV="prod", JWT_SECRET="x" * 32).refresh_cookie_secure is True
+    prod = {"APP_ENV": "prod", "JWT_SECRET": "x" * 32, "CORE_INTERNAL_TOKEN": "t" * 32}
+    assert Settings(**prod).refresh_cookie_secure is True
     assert Settings(APP_ENV="dev").refresh_cookie_secure is False
-    assert Settings(APP_ENV="prod", JWT_SECRET="x" * 32, REFRESH_COOKIE_SECURE=False).refresh_cookie_secure is False
+    assert Settings(**prod, REFRESH_COOKIE_SECURE=False).refresh_cookie_secure is False

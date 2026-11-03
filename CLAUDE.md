@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/Scripts/python.exe -m pytest tests/test_llm_jobs.py::test_name -q
 .venv/Scripts/python.exe -m pytest -k "lease and recover" -q
 
-# весь стек (postgres, redis, backend, parse-worker, llm-worker, frontend)
+# весь стек (postgres, redis, backend, parse-worker, llm-worker, hh-service, hh-worker, frontend)
 docker compose up --build                 # UI :5173, API :9000/docs
 # observability (Prometheus/Grafana/Loki/Alloy/Tempo) — только при COMPOSE_PROFILES=observability в .env
 
@@ -27,6 +27,10 @@ docker compose up --build                 # UI :5173, API :9000/docs
 # (127.0.0.1, не localhost: порт опубликован только на IPv4, через ::1 psycopg на Windows ждёт connect timeout)
 .venv/Scripts/python.exe -m uvicorn backend.main:app --reload --port 8000
 # (всегда один процесс; несколько — API_WORKERS у jobdesk-api, нужны Redis, JWT_SECRET и rq)
+
+# HH-сервис локально (вкладка HH): ядру HH_SERVICE_URL=http://127.0.0.1:8100, сервису
+# HH_SYNC_JOB_BACKEND=inprocess CORE_INTERNAL_URL=http://127.0.0.1:8000; токены в dev — общие по умолчанию
+.venv/Scripts/jobdesk-hh-service.exe
 
 # frontend локально: /api проксируется Vite (VITE_API_PROXY_TARGET=http://localhost:9000 для
 # compose-backend, по умолчанию :8000 — uvicorn); same-origin нужен refresh-cookie SameSite=Strict
@@ -42,11 +46,18 @@ cd frontend && npm run dev
 
 ## Архитектура
 
-Три Python-пакета в одном репозитории плюс React UI:
+Python-пакеты в одном репозитории плюс React UI:
 
 - **`jobdesk/`** — ядро: Telethon-fetch, правиловое извлечение, AI-enrichment,
   дедуп, FX, HH-клиент, экспорт. Не знает о FastAPI/SQLAlchemy.
-- **`backend/`** — FastAPI, SQLAlchemy-репозитории, очереди RQ, воркеры, auth, observability.
+- **`backend/`** — ядро: FastAPI, SQLAlchemy-репозитории, очереди RQ, воркеры, auth, observability.
+- **`jobdesk_platform/`** — инфраструктура процессов без домена: `Database`, tracing, RQ-раннер,
+  liveness/healthcheck, recover-цикл, SSE, pub/sub, `AppError`, сервисные токены, `ServiceClient`.
+  Старые модули `backend` (`errors`, `api/sse`, `workers/liveness` …) — алиасы `sys.modules` на него.
+- **`jobdesk_hh/`** — HH-сервис (вынесен из ядра, этап 1 из 3 — `openspec/changes/hh-service`):
+  sync, кэш выдачи, джобы, API `/v1/*` (вызывает только ядро, `HH_SERVICE_TOKEN`), entrypoints
+  `jobdesk-hh-service` / `jobdesk-hh-worker`. Данные — схема `hh` (своя цепочка Alembic в
+  `jobdesk_hh/migrations`, применяет сам сервис). Вакансии — только через внутренний API ядра.
 - **`jobdesk_mcp/`** — MCP-сервер (stdio) для Claude: только клиент HTTP API с персональным
   токеном (`tgj_…`), не импортирует ни `backend`, ни ядро. Зависимость `mcp` — extra `mcp`,
   в образ backend не входит. Новый инструмент = эндпоинт API; мутирующий эндпоинт, который
@@ -56,6 +67,21 @@ cd frontend && npm run dev
   типы ответов — в `src/types/api.ts` (держать в синхроне с `backend/schemas.py`).
 
 Схемы потоков (mermaid) — `docs/architecture/`.
+
+### Границы пакетов и сервисов
+
+Кто кого импортирует, проверяет `tests/test_import_boundaries.py`: `jobdesk` — никого
+(кроме `jobdesk/cli/db.py`); `jobdesk_platform` — только `jobdesk`; `jobdesk_hh` — `jobdesk` и
+платформу, не `backend`; `backend` — не `jobdesk_hh` (только HTTP).
+
+- **Внутренний API ядра** — `/internal/v1/*` (`backend/api/routes/internal.py`), вне `/api/v1`,
+  только с `CORE_INTERNAL_TOKEN`: чтение вакансий по `source_post_key` и запись пачек HH.
+  Контракт — `jobdesk/contracts/core_internal.py`. Сервису нужны данные ядра — новый эндпоинт здесь.
+- **Прокси** — публичные `/api/v1/hh/*` остаются в ядре (`routes/hh.py`): admin, idempotency и
+  SSE-тикет проверяет ядро, тело/ошибку сервиса отдаёт как есть; сервис недоступен — 503
+  `UPSTREAM_UNAVAILABLE`. Контракт — `jobdesk/contracts/hh_service.py`.
+- **Тесты** — ядро и HH-сервис в одном процессе: `hh_client` / `hh_service_stack` в conftest,
+  после `monkeypatch.setenv` — `clear_settings_caches()` (кэш настроек обоих).
 
 ### Граница core ↔ backend
 
@@ -92,6 +118,9 @@ dedup → FX в ₽ → UPSERT в `vacancies` → метрики.
   для HH — `sha256(hh:{id})`; UPSERT по нему и есть межпрогонный дедуп.
 
 ### Durable-джобы (parse, LLM, HH sync)
+
+HH sync устроен так же, но живёт в HH-сервисе: таблица `hh.hh_sync_jobs`, recover в `hh-worker`
+или (в `inprocess`) в процессе `jobdesk-hh-service`, а не в API ядра.
 
 Источник истины по статусу — Postgres, Redis — только транспорт (очередь RQ +
 pub/sub для SSE). Все три типа джоб устроены одинаково:

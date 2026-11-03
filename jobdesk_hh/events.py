@@ -1,4 +1,4 @@
-"""Redis Pub/Sub для статуса фонового HH sync (SSE на API)."""
+"""Redis Pub/Sub для статуса фонового HH sync (SSE сервиса)."""
 
 from __future__ import annotations
 
@@ -21,10 +21,10 @@ def publish_hh_sync_event(job_id: uuid.UUID | str, *, status: str) -> None:
     Сообщение — только сигнал «что-то изменилось»: SSE перечитывает джобу из БД.
     """
     try:
-        from backend.queue.rq_conn import get_redis_connection
-        from backend.settings import get_settings
+        from jobdesk_hh.queue import get_redis_connection
+        from jobdesk_hh.settings import get_hh_settings
 
-        if not (get_settings().redis_url or "").strip():
+        if not (get_hh_settings().redis_url or "").strip():
             return
         payload = {"job_id": str(job_id), "status": status}
         get_redis_connection().publish(channel_for(job_id), json.dumps(payload))

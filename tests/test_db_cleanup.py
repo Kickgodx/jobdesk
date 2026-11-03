@@ -13,7 +13,6 @@ from backend.db import vacancy_repository
 from backend.db.models import (
     AIExtractionCacheRow,
     ExchangeRateRow,
-    HhSyncJobRow,
     IdempotencyKeyRow,
     LlmJobRow,
     ParseRunRow,
@@ -142,25 +141,6 @@ def test_count_cache_is_bounded(monkeypatch):
         vacancy_repository._set_cached_vacancy_count(f"q={uuid.uuid4()}-{i}", i)
         assert len(vacancy_repository._count_cache) <= 4
     vacancy_repository.invalidate_vacancy_count_cache()
-
-
-def test_purge_old_hh_sync_jobs_keeps_active_and_recent():
-    def hh_job(status: str, finished_days_ago: float | None) -> HhSyncJobRow:
-        return HhSyncJobRow(
-            status=status,
-            params={},
-            created_at=NOW - timedelta(days=400),
-            finished_at=None if finished_days_ago is None else NOW - timedelta(days=finished_days_ago),
-        )
-
-    with session_scope() as session:
-        session.add_all([hh_job("completed", 365), hh_job("failed", 200), hh_job("completed", 10)])
-        session.add(hh_job("running", None))  # активный не трогаем, даже старый
-
-    stats = purge_service_tables(RetentionConfig(parse_runs_ttl_days=180), now=NOW)
-
-    assert stats.hh_sync_jobs == 2
-    assert _count(HhSyncJobRow) == 2
 
 
 def _rate(days_ago: int, currency: str = "USD") -> ExchangeRateRow:

@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from backend.db.hh_repository import backfill_hh_grades_from_experience
 from backend.db.models import VacancyRow
+from backend.db.vacancy_repository import backfill_hh_grades_from_experience
 from jobdesk.hh.mapper import hh_source_post_key, stable_vacancy_id
 
 

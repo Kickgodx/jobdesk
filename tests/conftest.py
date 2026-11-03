@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -112,7 +113,7 @@ class PgDatabase:
 
 @pytest.fixture(scope="session")
 def pg_database(default_test_config):
-    """Своя база воркера с применёнными миграциями (как при старте backend)."""
+    """Своя база воркера с применёнными миграциями ядра и HH-сервиса (как при их старте)."""
     admin_url = os.environ.get("TEST_DATABASE_URL")
     if not admin_url:
         reason = os.environ.get(_PG_ERROR_ENV, "TEST_DATABASE_URL не задан")
@@ -137,15 +138,21 @@ def pg_database(default_test_config):
     reset_engine()
     init_db()
     reset_engine()
+    # Схема HH-сервиса — своя цепочка, как при старте jobdesk_hh.
+    from jobdesk_hh.migrate import upgrade_head as hh_upgrade_head
+
+    hh_upgrade_head(url)
     mp.undo()
     get_settings.cache_clear()
 
     engine = sa.create_engine(url, pool_size=1, max_overflow=0, pool_pre_ping=True)
     with engine.connect() as conn:
+        # Схемы ядра и сервисов (hh — HH-сервис); имена квалифицированы для TRUNCATE.
         tables = sorted(
             conn.execute(
                 sa.text(
-                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+                    "SELECT format('%I.%I', schemaname, tablename) FROM pg_tables "
+                    "WHERE schemaname IN ('public', 'hh') AND tablename <> 'alembic_version'"
                 )
             ).scalars()
         )
@@ -318,7 +325,9 @@ def otel_exporter():
         trace._TRACER_PROVIDER_SET_ONCE = Once()
         trace._TRACER_PROVIDER = None
         for name, module in list(sys.modules.items()):
-            if name.startswith(("backend.", "jobdesk.")) and isinstance(getattr(module, "_TRACER", None), trace.Tracer):
+            if name.startswith(("backend.", "jobdesk.", "jobdesk_hh.", "jobdesk_platform.")) and isinstance(
+                getattr(module, "_TRACER", None), trace.Tracer
+            ):
                 module._TRACER = trace.ProxyTracer(name)
 
     exp = InMemorySpanExporter()
@@ -414,3 +423,58 @@ def admin_client(api_client):
     """``api_client``, залогиненный первым пользователем (admin)."""
     login_as_admin(api_client)
     return api_client
+
+
+def clear_settings_caches() -> None:
+    """Сбросить кэш настроек ядра и HH-сервиса (после ``monkeypatch.setenv``)."""
+    from backend.settings import get_settings
+    from jobdesk_hh.settings import get_hh_settings
+
+    get_settings.cache_clear()
+    get_hh_settings.cache_clear()
+
+
+@contextmanager
+def hh_service_stack(monkeypatch):
+    """HH-сервис в процессе теста, связанный с ядром в обе стороны (platform/internal-services).
+
+    Ядро → сервис и сервис → ядро ходят через отдельные ``TestClient`` без контекста: у каждого
+    запроса свой portal, поток inprocess-sync не делит клиента с потоком теста. Lifespan
+    сервиса (миграции схемы hh, recover) поднимает ``TestClient`` в контексте. Lifespan ядра
+    запускает вызывающий (``api_client`` или свой ``TestClient(app)``).
+    """
+    import httpx
+    from fastapi.testclient import TestClient
+
+    from backend.main import app as core_app
+    from backend.services import hh_service_client
+    from jobdesk_hh import core_client as hh_core_client
+    from jobdesk_hh.api import app as hh_app
+    from jobdesk_hh.db.session import reset_database
+    from jobdesk_hh.queue import reset_redis_connection
+
+    monkeypatch.setenv("HH_SYNC_JOB_BACKEND", "inprocess")
+    monkeypatch.setenv("HH_SERVICE_METRICS_PORT", "0")
+    monkeypatch.setenv("HH_MAINTENANCE_INTERVAL_SECONDS", "0")
+    clear_settings_caches()
+    reset_database()
+    with TestClient(hh_app) as hh:
+        hh_core_client.set_http_client_override(TestClient(core_app))
+        hh_service_client.set_client_overrides(
+            TestClient(hh_app),
+            lambda: httpx.AsyncClient(transport=httpx.ASGITransport(app=hh_app), base_url="http://hh-service"),
+        )
+        try:
+            yield hh
+        finally:
+            hh_core_client.set_http_client_override(None)
+            hh_service_client.set_client_overrides(None)
+    reset_database()
+    reset_redis_connection()
+
+
+@pytest.fixture
+def hh_client(api_client, monkeypatch):
+    """``api_client`` ядра с подключённым HH-сервисом; значение — ``TestClient`` самого сервиса."""
+    with hh_service_stack(monkeypatch) as hh:
+        yield hh

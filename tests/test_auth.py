@@ -235,6 +235,7 @@ def test_registration_closed_for_new_users(client: TestClient, monkeypatch):
 def test_registration_closed_by_default_in_prod(client: TestClient, monkeypatch):
     monkeypatch.setenv("APP_ENV", "prod")
     monkeypatch.setenv("JWT_SECRET", "test-secret-value-for-tests-32-chars")
+    monkeypatch.setenv("CORE_INTERNAL_TOKEN", "test-core-internal-token-32-chars-x")
     monkeypatch.delenv("AUTH_REGISTRATION_OPEN", raising=False)
     from backend.settings import get_settings
 

@@ -1,4 +1,11 @@
-"""Синхронизация вакансий HH: search → listings → dedup → detail (если нужно) → DB."""
+"""Синхронизация вакансий HH: search → listings → dedup → detail (если нужно) → ядро.
+
+Кэш выдачи и lock — в схеме ``hh`` (сессия сервиса); вакансии читаются и пишутся через
+внутренний API ядра (``CoreClient``): сохранённые вакансии групп — пачкой на окно групп,
+новые и обновлённые — пачками по ``hh.db_flush_batch_size``. Детали listing отмечаются
+скачанными только после того, как ядро подтвердило запись пачки: иначе следующий sync
+пропустил бы детали вакансии, которой нет в базе.
+"""
 
 from __future__ import annotations
 
@@ -11,16 +18,8 @@ from dataclasses import dataclass, field
 from opentelemetry import trace
 from sqlalchemy.orm import Session
 
-from backend.db import hh_repository as hh_repo
-from backend.db.vacancy_mapper import row_to_vacancy
-from backend.observability import (
-    record_hh_api_error,
-    record_hh_details,
-    record_hh_sync_finished,
-)
-from backend.services.hh_sync_window import ResolvedHhSearchWindow
-from backend.settings import Settings
 from jobdesk.config.schema import AppConfig, HhConfig
+from jobdesk.contracts.core_internal import MAX_BATCH
 from jobdesk.hh.client import HH_VACANCIES_DEPTH_LIMIT, HHApiError, HHClient, HHClientConfig
 from jobdesk.hh.dedup import DedupedVacancy, dedupe_vacancies
 from jobdesk.hh.mapper import (
@@ -31,6 +30,15 @@ from jobdesk.hh.mapper import (
 )
 from jobdesk.hh.models import VacancySearchParams, VacancyShort
 from jobdesk.models.vacancy import Vacancy
+from jobdesk_hh.core_client import CoreClient
+from jobdesk_hh.db import listings
+from jobdesk_hh.observability import (
+    record_hh_api_error,
+    record_hh_details,
+    record_hh_sync_finished,
+)
+from jobdesk_hh.settings import HhSettings
+from jobdesk_hh.window import ResolvedHhSearchWindow
 
 _LOG = logging.getLogger(__name__)
 _TRACER = trace.get_tracer(__name__)
@@ -73,29 +81,15 @@ class HhSyncResult:
     date_to: str | None = None
 
 
-def _client_from(settings: Settings, hh: HhConfig) -> HHClient:
-    token = (settings.hh_api_token or "").strip()
-    email = (settings.hh_contact_email or "").strip()
-    if not hh.enabled:
-        raise HhSyncNotConfigured("HH sync disabled (hh.enabled=false)")
-    if not token:
-        raise HhSyncNotConfigured("HH_API_TOKEN is not set")
-    if not email:
-        raise HhSyncNotConfigured("HH_CONTACT_EMAIL is not set")
-    return HHClient(
-        HHClientConfig(
-            api_token=token,
-            contact_email=email,
-            api_base=hh.api_base,
-            host=hh.host,
-            app_name=hh.app_name,
-            app_version=hh.app_version,
-            max_rps=hh.max_rps,
-        )
-    )
+@dataclass
+class _Buffer:
+    """Вакансии к записи в ядро и hh id, чьи детали скачаны для этих вакансий."""
+
+    vacancies: list[Vacancy] = field(default_factory=list)
+    fetched_details: list[str] = field(default_factory=list)
 
 
-def ensure_hh_ready(settings: Settings, hh: HhConfig) -> None:
+def ensure_hh_ready(settings: HhSettings, hh: HhConfig) -> None:
     """Проверить конфиг без открытия HTTP-клиента."""
     token = (settings.hh_api_token or "").strip()
     email = (settings.hh_contact_email or "").strip()
@@ -107,17 +101,56 @@ def ensure_hh_ready(settings: Settings, hh: HhConfig) -> None:
         raise HhSyncNotConfigured("HH_CONTACT_EMAIL is not set")
 
 
+def _client_from(settings: HhSettings, hh: HhConfig) -> HHClient:
+    ensure_hh_ready(settings, hh)
+    return HHClient(
+        HHClientConfig(
+            api_token=(settings.hh_api_token or "").strip(),
+            contact_email=(settings.hh_contact_email or "").strip(),
+            api_base=hh.api_base,
+            host=hh.host,
+            app_name=hh.app_name,
+            app_version=hh.app_version,
+            max_rps=hh.max_rps,
+        )
+    )
+
+
+def _group_keys(group: DedupedVacancy) -> list[str]:
+    return [hh_source_post_key(group.id), *(hh_source_post_key(dup_id) for dup_id, _ in group.duplicates)]
+
+
+def lookup_windows(groups: list[DedupedVacancy], *, max_keys: int = MAX_BATCH) -> list[tuple[int, int]]:
+    """Разбить группы на окна ``[start, end)``, у которых не больше ``max_keys`` ключей.
+
+    Группа крупнее лимита — окно из одной группы (``CoreClient.lookup`` порежет её сам).
+    """
+    windows: list[tuple[int, int]] = []
+    start, keys = 0, 0
+    for i, group in enumerate(groups):
+        n = 1 + len(group.duplicates)
+        if i > start and keys + n > max_keys:
+            windows.append((start, i))
+            start, keys = i, 0
+        keys += n
+    if start < len(groups):
+        windows.append((start, len(groups)))
+    return windows
+
+
 def run_hh_sync(
     session: Session,
     *,
     config: AppConfig,
-    settings: Settings,
+    settings: HhSettings,
+    core: CoreClient,
     search_window: ResolvedHhSearchWindow | None = None,
     progress_callback: HhSyncProgressCallback | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> HhSyncResult:
     """Поиск → детали групп → purge listings.
 
+    ``session`` — сессия схемы hh (кэш выдачи); вакансии — через ``core``.
     ``should_stop`` проверяется перед каждой следующей страницей поиска и группой
     деталей: True → sync завершается досрочно — уже полученные вакансии дописываются,
     purge пропускается, возвращается частичный итог (отмену фиксирует вызывающий).
@@ -126,7 +159,7 @@ def run_hh_sync(
     thread_locked = _SYNC_LOCK.acquire(blocking=False)
     if not thread_locked:
         raise HhSyncConflict("HH sync already in progress")
-    db_lock = hh_repo.HhSyncDbLock(session)
+    db_lock = listings.HhSyncDbLock(session)
     started = time.monotonic()
     result = HhSyncResult()
     outcome = "success"
@@ -165,7 +198,7 @@ def run_hh_sync(
                 span.set_attribute("hh.pages", pages)
 
                 with _TRACER.start_as_current_span("hh.listings_upsert"):
-                    result.listings_upserted = hh_repo.upsert_listings_from_shorts(session, shorts)
+                    result.listings_upserted = listings.upsert_listings_from_shorts(session, shorts)
                     session.commit()
 
                 by_id = {s.id: s for s in shorts}
@@ -179,49 +212,65 @@ def run_hh_sync(
                 report("details", 0, len(groups))
 
                 batch_size = hh.db_flush_batch_size
-                buffer: list[Vacancy] = []
+                buffer = _Buffer()
 
                 def flush_buffer(*, force: bool = False) -> None:
-                    if not buffer:
+                    if not buffer.vacancies:
                         return
-                    if not force and len(buffer) < batch_size:
+                    if not force and len(buffer.vacancies) < batch_size:
                         return
                     with _TRACER.start_as_current_span("hh.upsert") as upsert_span:
-                        stats = hh_repo.upsert_hh_vacancies(session, buffer, fx_config=config.fx)
+                        stats = core.upsert_hh(buffer.vacancies)
                         result.vacancies_inserted += stats.inserted
                         result.vacancies_updated += stats.updated_existing
                         result.flush_batches += 1
-                        upsert_span.set_attribute("hh.batch_size", len(buffer))
+                        upsert_span.set_attribute("hh.batch_size", len(buffer.vacancies))
                         upsert_span.set_attribute("hh.inserted", stats.inserted)
                         upsert_span.set_attribute("hh.updated", stats.updated_existing)
+                    # Ядро записало пачку — теперь детали можно считать скачанными.
+                    for hh_id in buffer.fetched_details:
+                        listings.mark_detail_fetched(session, hh_id)
                     session.commit()
                     _LOG.info(
                         "HH flush batch #%s: %s vacancies (+%s/~%s)",
                         result.flush_batches,
-                        len(buffer),
+                        len(buffer.vacancies),
                         stats.inserted,
                         stats.updated_existing,
                     )
-                    buffer.clear()
+                    buffer.vacancies.clear()
+                    buffer.fetched_details.clear()
 
-                for done, group in enumerate(groups, 1):
+                done = 0
+                for start, end in lookup_windows(groups):
                     if stopped or stop_requested():
                         stopped = True
                         break
-                    _process_group(
-                        client,
-                        session,
-                        group,
-                        by_id,
-                        result,
-                        buffer,
-                        on_buffered=lambda: flush_buffer(force=False),
-                    )
-                    by_id.pop(group.id, None)
-                    for dup_id, _ in group.duplicates:
-                        by_id.pop(dup_id, None)
-                    flush_buffer()
-                    report("details", done, len(groups))
+                    window_groups = groups[start:end]
+                    with _TRACER.start_as_current_span("hh.lookup") as lookup_span:
+                        existing = core.lookup([key for g in window_groups for key in _group_keys(g)])
+                        lookup_span.set_attribute("hh.groups", len(window_groups))
+                        lookup_span.set_attribute("hh.found", len(existing))
+                    for group in window_groups:
+                        if stopped or stop_requested():
+                            stopped = True
+                            break
+                        _process_group(
+                            client,
+                            session,
+                            group,
+                            by_id,
+                            result,
+                            buffer,
+                            existing,
+                            on_buffered=lambda: flush_buffer(force=False),
+                        )
+                        by_id.pop(group.id, None)
+                        for dup_id, _ in group.duplicates:
+                            by_id.pop(dup_id, None)
+                        flush_buffer()
+                        done += 1
+                        report("details", done, len(groups))
 
                 # И при отмене: детали в буфере уже оплачены запросами к HH.
                 flush_buffer(force=True)
@@ -233,7 +282,7 @@ def run_hh_sync(
                     outcome = "cancelled"
                     _LOG.info("HH sync: остановлен по запросу отмены, purge listings пропущен")
                 else:
-                    result.listings_purged = hh_repo.purge_expired_listings(session, ttl_days=hh.listing_ttl_days)
+                    result.listings_purged = listings.purge_expired_listings(session, ttl_days=hh.listing_ttl_days)
                     session.commit()
                 span.set_attribute("hh.details_fetched", result.details_fetched)
                 span.set_attribute("hh.details_skipped", result.details_skipped)
@@ -346,7 +395,7 @@ def _stabilize_groups(
         members.extend(group.duplicates)
         preferred_id: str | None = None
         for mid, _area in members:
-            if hh_repo.listing_detail_fetched(session, mid):
+            if listings.listing_detail_fetched(session, mid):
                 preferred_id = mid
                 break
         if preferred_id is None or preferred_id == group.id:
@@ -373,13 +422,20 @@ def _stabilize_groups(
     return out
 
 
+def _saved(existing: dict[str, Vacancy], hh_id: str) -> Vacancy | None:
+    """Сохранённая вакансия ядра (копия: окно lookup общее для групп)."""
+    v = existing.get(hh_source_post_key(hh_id))
+    return v.model_copy(deep=True) if v is not None else None
+
+
 def _process_group(
     client: HHClient,
     session: Session,
     group: DedupedVacancy,
     by_id: dict[str, VacancyShort],
     result: HhSyncResult,
-    buffer: list[Vacancy],
+    buffer: _Buffer,
+    existing: dict[str, Vacancy],
     *,
     on_buffered: Callable[[], None],
 ) -> None:
@@ -389,19 +445,18 @@ def _process_group(
     if short is None:
         return
 
-    if hh_repo.listing_detail_fetched(session, canonical_id):
+    if listings.listing_detail_fetched(session, canonical_id):
         result.details_skipped += 1
-        existing = hh_repo.get_vacancy_by_source_post_key(session, hh_source_post_key(canonical_id))
-        if existing is not None:
-            v = row_to_vacancy(existing)
-            v.is_duplicate = False
-            v.duplicate_group_id = None
-            v.duplicate_reason = None
-            buffer.append(v)
+        saved = _saved(existing, canonical_id)
+        if saved is not None:
+            saved.is_duplicate = False
+            saved.duplicate_group_id = None
+            saved.duplicate_reason = None
+            buffer.vacancies.append(saved)
         else:
-            _fetch_into_buffer(client, session, short, result, buffer, is_duplicate=False)
+            _fetch_into_buffer(client, short, result, buffer, existing, is_duplicate=False)
     else:
-        _fetch_into_buffer(client, session, short, result, buffer, is_duplicate=False)
+        _fetch_into_buffer(client, short, result, buffer, existing, is_duplicate=False)
     on_buffered()
 
     for dup_id, _area in group.duplicates:
@@ -414,6 +469,7 @@ def _process_group(
             dup_short,
             result,
             buffer,
+            existing,
             group_vacancy_id=group_vacancy_id,
         )
         on_buffered()
@@ -424,34 +480,33 @@ def _append_duplicate(
     session: Session,
     short: VacancyShort,
     result: HhSyncResult,
-    buffer: list[Vacancy],
+    buffer: _Buffer,
+    existing: dict[str, Vacancy],
     *,
     group_vacancy_id: str,
 ) -> None:
     """Дубль города: не затирать уже сохранённый detail short-stub'ом."""
-    key = hh_source_post_key(short.id)
-    existing = hh_repo.get_vacancy_by_source_post_key(session, key)
-    if existing is not None:
-        v = row_to_vacancy(existing)
-        v.is_duplicate = True
-        v.duplicate_group_id = group_vacancy_id
-        v.duplicate_reason = "hh_multicity"
-        buffer.append(v)
+    saved = _saved(existing, short.id)
+    if saved is not None:
+        saved.is_duplicate = True
+        saved.duplicate_group_id = group_vacancy_id
+        saved.duplicate_reason = "hh_multicity"
+        buffer.vacancies.append(saved)
         return
-    if hh_repo.listing_detail_fetched(session, short.id):
+    if listings.listing_detail_fetched(session, short.id):
         # detail был, строки нет — перекачаем, не деградируем до short
         _fetch_into_buffer(
             client,
-            session,
             short,
             result,
             buffer,
+            existing,
             is_duplicate=True,
             duplicate_group_id=group_vacancy_id,
             duplicate_reason="hh_multicity",
         )
         return
-    buffer.append(
+    buffer.vacancies.append(
         short_to_vacancy(
             short,
             is_duplicate=True,
@@ -463,10 +518,10 @@ def _append_duplicate(
 
 def _fetch_into_buffer(
     client: HHClient,
-    session: Session,
     short: VacancyShort,
     result: HhSyncResult,
-    buffer: list[Vacancy],
+    buffer: _Buffer,
+    existing: dict[str, Vacancy],
     *,
     is_duplicate: bool,
     duplicate_group_id: str | None = None,
@@ -482,25 +537,25 @@ def _fetch_into_buffer(
             duplicate_group_id=duplicate_group_id,
             duplicate_reason=duplicate_reason,
         )
-        hh_repo.mark_detail_fetched(session, short.id)
+        # Отметка «детали скачаны» — после записи пачки ядром (flush_buffer).
+        buffer.fetched_details.append(short.id)
         result.details_fetched += 1
-        buffer.append(vac)
+        buffer.vacancies.append(vac)
     except HHApiError as exc:
         record_hh_api_error(status=str(exc.status_code or "unknown"))
         msg = f"detail {short.id}: HTTP {exc.status_code}"
         result.errors.append(msg)
         _LOG.warning("HH %s", msg)
-        existing = hh_repo.get_vacancy_by_source_post_key(session, hh_source_post_key(short.id))
-        if existing is not None:
+        saved = _saved(existing, short.id)
+        if saved is not None:
             # Повторная загрузка не удалась: сохранённая карточка остаётся (upsert HH перезаписал
             # бы полный текст короткой выдачей). Детали не отмечены — следующий sync попробует снова.
-            v = row_to_vacancy(existing)
-            v.is_duplicate = is_duplicate
-            v.duplicate_group_id = duplicate_group_id
-            v.duplicate_reason = duplicate_reason
-            buffer.append(v)
+            saved.is_duplicate = is_duplicate
+            saved.duplicate_group_id = duplicate_group_id
+            saved.duplicate_reason = duplicate_reason
+            buffer.vacancies.append(saved)
             return
-        buffer.append(
+        buffer.vacancies.append(
             short_to_vacancy(
                 short,
                 is_duplicate=is_duplicate,

@@ -199,7 +199,7 @@ Liveness RQ-воркеров (не yaml): `WORKER_HEARTBEAT_MAX_AGE_SECONDS` (п
 | Поле | Назначение |
 |------|------------|
 | **`enabled`** | Разрешить `POST /hh/sync` и вкладку `/hh`. |
-| **`listing_ttl_days`** | TTL кэша короткой выдачи `hh_listings` (по `last_seen_at`). `0` — не чистить. После purge detail снова запросится. |
+| **`listing_ttl_days`** | TTL кэша короткой выдачи `hh.hh_listings` (по `last_seen_at`; чистит HH-сервис после sync, при старте и раз в час). `0` — не чистить. После purge detail снова запросится. |
 | **`max_rps`** | Лимит RPS к HH API (retry на 429). |
 | **`db_flush_batch_size`** | Сколько вакансий копить перед UPSERT+commit (по умолчанию 30). Буфер в памяти очищается после каждого батча. |
 | **`api_base` / `host`** | Базовый URL API и query `host`. |

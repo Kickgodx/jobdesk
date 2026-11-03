@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import backend.db.models  # noqa: F401
-from backend.db import hh_repository as hh_repo
-from backend.db.models import HhListingRow, VacancyRow
-from backend.services import hh_sync_service
-from backend.settings import Settings
+from tests.hh_support import FakeCore
+
 from jobdesk.config.schema import AppConfig, HhConfig, HhSearchConfig
 from jobdesk.hh.client import HHApiError
 from jobdesk.hh.dedup import DedupedVacancy
 from jobdesk.hh.mapper import hh_source_post_key, stable_vacancy_id
 from jobdesk.hh.models import VacancyShort
+from jobdesk.models.vacancy import Vacancy
+from jobdesk_hh import sync as hh_sync_service
+from jobdesk_hh.db import listings as hh_repo
+from jobdesk_hh.db.models import HhListingRow
+from jobdesk_hh.settings import HhSettings
 
 
 def _short(vid: str, *, area: str = "Москва", req: str = "Python") -> VacancyShort:
@@ -108,27 +109,27 @@ def test_stabilize_prefers_detail_fetched_canonical(db_session):
         assert stabilized[0].duplicates == [("1", "Москва")]
 
 
-def test_duplicate_does_not_overwrite_existing_detail_vacancy(db_session):
-    now = datetime.now(UTC)
-    vid = "42"
-    with db_session as session:
-        session.add(
-            VacancyRow(
-                id=stable_vacancy_id(vid),
-                source_post_key=hh_source_post_key(vid),
-                source_channel="hh",
-                source_url="https://hh.ru",
-                post_url=f"https://hh.ru/vacancy/{vid}",
-                raw_text="<p>full detail body</p>",
-                cleaned_text="full detail body",
-                extraction_source="hh_api",
-                vacancy_score=100,
-                parsed_at=now,
-            )
-        )
-        session.commit()
+def _saved_detail_vacancy(vid: str) -> dict[str, Vacancy]:
+    """Сохранённая в ядре карточка с деталями — так её отдаёт lookup внутреннего API."""
+    v = Vacancy(
+        id=stable_vacancy_id(vid),
+        source_post_key=hh_source_post_key(vid),
+        source_channel="hh",
+        source_url="https://hh.ru",
+        post_url=f"https://hh.ru/vacancy/{vid}",
+        raw_text="<p>full detail body</p>",
+        cleaned_text="full detail body",
+        extraction_source="hh_api",
+        vacancy_score=100,
+    )
+    return {v.source_post_key: v}
 
-        buffer: list = []
+
+def test_duplicate_does_not_overwrite_existing_detail_vacancy(db_session):
+    vid = "42"
+    existing = _saved_detail_vacancy(vid)
+    with db_session as session:
+        buffer = hh_sync_service._Buffer()
         result = hh_sync_service.HhSyncResult()
         hh_sync_service._append_duplicate(
             MagicMock(),
@@ -136,61 +137,46 @@ def test_duplicate_does_not_overwrite_existing_detail_vacancy(db_session):
             _short(vid, area="Казань"),
             result,
             buffer,
+            existing,
             group_vacancy_id=stable_vacancy_id("1"),
         )
-        assert len(buffer) == 1
-        assert "full detail body" in buffer[0].cleaned_text
-        assert buffer[0].is_duplicate is True
+        assert len(buffer.vacancies) == 1
+        assert "full detail body" in buffer.vacancies[0].cleaned_text
+        assert buffer.vacancies[0].is_duplicate is True
+        # Окно lookup общее для групп: сохранённая копия не меняется.
+        assert existing[hh_source_post_key(vid)].is_duplicate is False
 
 
-def _saved_detail_vacancy(session, vid: str) -> None:
-    session.add(
-        VacancyRow(
-            id=stable_vacancy_id(vid),
-            source_post_key=hh_source_post_key(vid),
-            source_channel="hh",
-            source_url="https://hh.ru",
-            post_url=f"https://hh.ru/vacancy/{vid}",
-            raw_text="<p>full detail body</p>",
-            cleaned_text="full detail body",
-            extraction_source="hh_api",
-            vacancy_score=100,
-            parsed_at=datetime.now(UTC),
-        )
-    )
-    session.commit()
-
-
-def test_failed_detail_refetch_keeps_saved_card(db_session):
+def test_failed_detail_refetch_keeps_saved_card():
     vid = "77"
-    with db_session as session:
-        _saved_detail_vacancy(session, vid)
-        client = MagicMock()
-        client.get_vacancy.side_effect = HHApiError("unavailable", status_code=503)
-        buffer: list = []
-        result = hh_sync_service.HhSyncResult()
+    client = MagicMock()
+    client.get_vacancy.side_effect = HHApiError("unavailable", status_code=503)
+    buffer = hh_sync_service._Buffer()
+    result = hh_sync_service.HhSyncResult()
 
-        hh_sync_service._fetch_into_buffer(client, session, _short(vid), result, buffer, is_duplicate=False)
+    hh_sync_service._fetch_into_buffer(
+        client, _short(vid), result, buffer, _saved_detail_vacancy(vid), is_duplicate=False
+    )
 
-        assert len(buffer) == 1
-        assert buffer[0].cleaned_text == "full detail body"
-        assert buffer[0].is_duplicate is False
-        assert result.errors == [f"detail {vid}: HTTP 503"]
-        assert result.details_fetched == 0
+    assert len(buffer.vacancies) == 1
+    assert buffer.vacancies[0].cleaned_text == "full detail body"
+    assert buffer.vacancies[0].is_duplicate is False
+    assert buffer.fetched_details == []  # детали не отмечены — следующий sync попробует снова
+    assert result.errors == [f"detail {vid}: HTTP 503"]
+    assert result.details_fetched == 0
 
 
-def test_failed_detail_of_new_vacancy_falls_back_to_short(db_session):
-    with db_session as session:
-        client = MagicMock()
-        client.get_vacancy.side_effect = HHApiError("unavailable", status_code=503)
-        buffer: list = []
-        result = hh_sync_service.HhSyncResult()
+def test_failed_detail_of_new_vacancy_falls_back_to_short():
+    client = MagicMock()
+    client.get_vacancy.side_effect = HHApiError("unavailable", status_code=503)
+    buffer = hh_sync_service._Buffer()
+    result = hh_sync_service.HhSyncResult()
 
-        hh_sync_service._fetch_into_buffer(client, session, _short("78"), result, buffer, is_duplicate=False)
+    hh_sync_service._fetch_into_buffer(client, _short("78"), result, buffer, {}, is_duplicate=False)
 
-        assert len(buffer) == 1
-        assert "QA Automation Engineer" in buffer[0].cleaned_text
-        assert result.errors == ["detail 78: HTTP 503"]
+    assert len(buffer.vacancies) == 1
+    assert "QA Automation Engineer" in buffer.vacancies[0].cleaned_text
+    assert result.errors == ["detail 78: HTTP 503"]
 
 
 def test_mid_group_flush_when_duplicates_exceed_batch(monkeypatch):
@@ -227,24 +213,13 @@ def test_mid_group_flush_when_duplicates_exceed_batch(monkeypatch):
                 }
             )
 
-    flush_sizes: list[int] = []
-
-    def fake_upsert(session, vacancies, *, fx_config=None):
-        flush_sizes.append(len(vacancies))
-        return SimpleNamespace(inserted=len(vacancies), updated_existing=0)
-
     # Все shorts дедупятся в одну группу (одинаковый content key).
     monkeypatch.setattr(hh_sync_service, "HHClient", FakeClient)
-    monkeypatch.setattr(
-        hh_sync_service.hh_repo,
-        "upsert_listings_from_shorts",
-        lambda *a, **k: len(shorts),
-    )
-    monkeypatch.setattr(hh_sync_service.hh_repo, "listing_detail_fetched", lambda *a, **k: False)
-    monkeypatch.setattr(hh_sync_service.hh_repo, "mark_detail_fetched", lambda *a, **k: None)
-    monkeypatch.setattr(hh_sync_service.hh_repo, "get_vacancy_by_source_post_key", lambda *a, **k: None)
-    monkeypatch.setattr(hh_sync_service.hh_repo, "upsert_hh_vacancies", fake_upsert)
-    monkeypatch.setattr(hh_sync_service.hh_repo, "purge_expired_listings", lambda *a, **k: 0)
+    monkeypatch.setattr(hh_sync_service.listings, "upsert_listings_from_shorts", lambda *a, **k: len(shorts))
+    monkeypatch.setattr(hh_sync_service.listings, "listing_detail_fetched", lambda *a, **k: False)
+    monkeypatch.setattr(hh_sync_service.listings, "mark_detail_fetched", lambda *a, **k: None)
+    monkeypatch.setattr(hh_sync_service.listings, "purge_expired_listings", lambda *a, **k: 0)
+    core = FakeCore()
 
     session = MagicMock()
     config = AppConfig(
@@ -254,11 +229,11 @@ def test_mid_group_flush_when_duplicates_exceed_batch(monkeypatch):
             search=HhSearchConfig(text="Python", professional_role=["124"], per_page=100),
         )
     )
-    settings = Settings(HH_API_TOKEN="t", HH_CONTACT_EMAIL="a@b.c")
-    result = hh_sync_service.run_hh_sync(session, config=config, settings=settings)
+    settings = HhSettings(HH_API_TOKEN="t", HH_CONTACT_EMAIL="a@b.c")
+    result = hh_sync_service.run_hh_sync(session, config=config, settings=settings, core=core)
 
     assert result.unique == 1
     assert result.duplicates == 4
     # 1 detail + 4 short dups = 5 → flush 2+2+1
-    assert flush_sizes == [2, 2, 1]
+    assert core.flushes == [2, 2, 1]
     assert result.flush_batches == 3

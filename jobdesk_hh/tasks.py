@@ -1,4 +1,4 @@
-"""Исполнение фонового HH sync (импортируется RQ по dotted-path)."""
+"""Исполнение фонового HH sync (импортируется RQ по dotted-path ``jobdesk_hh.tasks.run_hh_sync_job``)."""
 
 from __future__ import annotations
 
@@ -11,15 +11,16 @@ import uuid
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
-from backend.db import hh_sync_job_repository as jobs
-from backend.db.session import session_scope
-from backend.services.hh_sync_events import publish_hh_sync_event
-from backend.services.hh_sync_service import HhSyncConflict, HhSyncResult, run_hh_sync
-from backend.services.hh_sync_window import ResolvedHhSearchWindow
-from backend.settings import get_settings
-from backend.workers import liveness
 from jobdesk.config.loader import load_config
 from jobdesk.hh.client import HHApiError
+from jobdesk_hh import core_client as core_client_module
+from jobdesk_hh.db import jobs
+from jobdesk_hh.db.session import session_scope
+from jobdesk_hh.events import publish_hh_sync_event
+from jobdesk_hh.settings import get_hh_settings
+from jobdesk_hh.sync import HhSyncConflict, HhSyncResult, run_hh_sync
+from jobdesk_hh.window import ResolvedHhSearchWindow
+from jobdesk_platform.workers import liveness
 
 _LOG = logging.getLogger(__name__)
 _TRACER = trace.get_tracer(__name__)
@@ -66,7 +67,7 @@ def _error_message(exc: Exception) -> str:
 
 
 def run_hh_sync_job(job_id: str, traceparent: str | None = None) -> None:
-    """Claim queued ``hh_sync_jobs`` и выполнить sync (in-process или RQ hh-worker)."""
+    """Claim queued ``hh.hh_sync_jobs`` и выполнить sync (поток сервиса или RQ hh-worker)."""
     jid = uuid.UUID(str(job_id))
     ctx = None
     if traceparent:
@@ -172,17 +173,22 @@ def _run_traced(job_id: uuid.UUID, span) -> None:
             date_from=params.get("date_from"),
             date_to=params.get("date_to"),
         )
-        settings = get_settings()
+        settings = get_hh_settings()
         config = load_config(settings.config_path)
-        with session_scope() as session:
-            latest = run_hh_sync(
-                session,
-                config=config,
-                settings=settings,
-                search_window=window,
-                progress_callback=on_progress,
-                should_stop=should_stop,
-            )
+        core = core_client_module.core_client()
+        try:
+            with session_scope() as session:
+                latest = run_hh_sync(
+                    session,
+                    config=config,
+                    settings=settings,
+                    core=core,
+                    search_window=window,
+                    progress_callback=on_progress,
+                    should_stop=should_stop,
+                )
+        finally:
+            core.close()
         status = "cancelled" if cancel_seen else "completed"
         if cancel_seen:
             _LOG.info("HH sync %s: отменён, итог до остановки сохранён", job_id)

@@ -1,3 +1,5 @@
+"""Окно поиска HH sync: all | 7d | 14d | 30d | range (``sources/hh-sync``)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

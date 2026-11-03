@@ -55,6 +55,9 @@ from backend.settings import get_settings
 from jobdesk.config.loader import load_config
 from jobdesk.config.schema import AiConfig, FxConfig
 from jobdesk.deduplication.changes import is_edited_repost, vacancy_changes
+from jobdesk.extraction.grade_extractor import UNKNOWN_GRADE
+from jobdesk.hh.grades import grade_from_experience_name
+from jobdesk.hh.mapper import HH_CHANNEL, hh_source_post_key
 from jobdesk.models.vacancy import Vacancy
 
 
@@ -778,3 +781,110 @@ def iter_export_run_vacancies(
 
 def get_vacancy_row(session: Session, vacancy_id: str) -> VacancyRow | None:
     return session.get(VacancyRow, vacancy_id)
+
+
+# --- HH: запись по source_post_key -------------------------------------------------------
+# Вакансии HH пишет HH-сервис через внутренний API ядра (``/internal/v1``): по стабильному
+# ``source_post_key`` с перезаписью полей, а не по content-hash, как у Telegram.
+
+
+def get_vacancies_by_source_post_keys(session: Session, source_post_keys: list[str]) -> dict[str, VacancyRow]:
+    """Строки вакансий по ``source_post_key`` (включая архивные и дубли); неизвестных ключей нет в ответе."""
+    keys = list(dict.fromkeys(k for k in source_post_keys if k))
+    if not keys:
+        return {}
+    rows = session.scalars(select(VacancyRow).where(VacancyRow.source_post_key.in_(keys))).all()
+    return {row.source_post_key: row for row in rows}
+
+
+def _hh_fx_config(fx_config: FxConfig | None) -> FxConfig:
+    """FX для записи HH: без читаемого config.yaml — без пересчёта в рубли, а не ошибка."""
+    if fx_config is not None:
+        return fx_config
+    try:
+        return load_config(get_settings().config_path).fx
+    except Exception:
+        return FxConfig(enabled=False)
+
+
+def _is_later(new: datetime | None, old: datetime | None) -> bool:
+    """``new`` строго позже ``old``; без одной из дат — нет."""
+    return new is not None and old is not None and new > old
+
+
+def get_vacancy_by_source_post_key(session: Session, source_post_key: str) -> VacancyRow | None:
+    return session.scalar(select(VacancyRow).where(VacancyRow.source_post_key == source_post_key).limit(1))
+
+
+def upsert_hh_vacancies(
+    session: Session,
+    vacancies: list[Vacancy],
+    *,
+    fx_config: FxConfig | None = None,
+) -> VacancyUpsertStats:
+    """
+    Insert/update HH-вакансий по ``source_post_key``.
+
+    При совпадении перезаписываются mapped-поля (в отличие от TG content-hash upsert).
+    """
+    if not vacancies:
+        return VacancyUpsertStats()
+    now = datetime.now(UTC)
+    fx = _hh_fx_config(fx_config)
+    rates_cache = preload_fx_rates_for_vacancies(session, vacancies, fx)
+    inserted = 0
+    updated_existing = 0
+    for v in vacancies:
+        key = v.source_post_key or hh_source_post_key(v.id)
+        existing = get_vacancy_by_source_post_key(session, key)
+        is_existing = existing is not None
+        apply_salary_rub_for_vacancy(v, session, fx, rates_cache=rates_cache, force=is_existing)
+        row = vacancy_to_row(v, parse_run_id=None)
+        data = {c.name: getattr(row, c.name) for c in writable_columns(VacancyRow)}
+        data.pop("updated_at", None)
+        if not data.get("parsed_at"):
+            data["parsed_at"] = now
+        if existing is not None:
+            data["id"] = existing.id
+            data["parsed_at"] = existing.parsed_at or data["parsed_at"]
+            data["last_parse_run_id"] = existing.last_parse_run_id
+            # HH поднял вакансию заново (published_at новее) — возвращаем из архива.
+            republished = _is_later(data["post_date"], existing.post_date)
+            data["archived_at"] = None if republished else existing.archived_at
+
+        stmt = insert(VacancyRow).values(**data)
+        update_cols = {k: data[k] for k in data if k not in ("id", "parsed_at", "last_parse_run_id", "created_at")}
+        update_cols["updated_at"] = now
+        session.execute(stmt.on_conflict_do_update(index_elements=["id"], set_=update_cols))
+        if is_existing:
+            updated_existing += 1
+        else:
+            inserted += 1
+    session.flush()
+    record_vacancy_upsert(inserted=inserted, updated_existing=updated_existing)
+    if inserted or updated_existing:
+        invalidate_vacancy_count_cache()
+    return VacancyUpsertStats(inserted=inserted, updated_existing=updated_existing)
+
+
+def backfill_hh_grades_from_experience(session: Session) -> int:
+    """Идемпотентно проставить detected_grade HH-вакансиям по required_experience."""
+    rows = session.scalars(
+        select(VacancyRow).where(
+            VacancyRow.source_channel == HH_CHANNEL,
+            VacancyRow.detected_grade == UNKNOWN_GRADE,
+            VacancyRow.required_experience.is_not(None),
+        )
+    ).all()
+    updated = 0
+    for row in rows:
+        grade = grade_from_experience_name(row.required_experience)
+        if grade == UNKNOWN_GRADE:
+            continue
+        row.detected_grade = grade
+        updated += 1
+    if updated:
+        session.flush()
+        invalidate_vacancy_count_cache()
+        _LOG.info("HH grades backfill: обновлено %s вакансий", updated)
+    return updated

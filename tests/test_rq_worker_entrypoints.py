@@ -21,19 +21,17 @@ from tests.conftest import new_user
 from tests.llm_job_helpers import use_ai_config
 
 from backend.config_builder import build_config
-from backend.db import hh_sync_job_repository as hh_jobs
 from backend.db import llm_job_repository as lj
 from backend.db import parse_run_repository as pr
 from backend.db.models import ResumeRow, VacancyMatchRow, VacancyRow
 from backend.db.session import session_scope
 from backend.queue import rq_conn
 from backend.schemas import RunCreateRequest
-from backend.services import hh_sync_job_service, llm_job_service, match_service, run_service
-from backend.services.hh_sync_window import ResolvedHhSearchWindow
+from backend.services import llm_job_service, match_service, run_service
 from backend.services.llm_job_service import KIND_MATCH, llm_job_runner
 from backend.services.llm_rate_gate import RedisWindowRateGate
 from backend.settings import get_settings
-from backend.workers import hh_sync_tasks, hh_worker, liveness, llm_worker, parse_tasks, parse_worker, runner
+from backend.workers import liveness, llm_worker, parse_tasks, parse_worker, runner
 from jobdesk.ai import cache_registry, rate_limit
 from jobdesk.ai.clients.openrouter import LLMUsage, OpenRouterClient
 from jobdesk.ai.prompts import MATCH_PROMPT_VERSION
@@ -52,9 +50,9 @@ def record_job(value: str) -> str:
 
 @pytest.fixture
 def fake_redis(pg_db, monkeypatch):
-    """Все три типа джоб — через RQ на общем fakeredis."""
+    """Джобы ядра (прогон, LLM) — через RQ на общем fakeredis; HH-воркер — tests/test_hh_worker.py."""
     server = fakeredis.FakeStrictRedis()
-    for env in ("PARSE_JOB_BACKEND", "LLM_JOB_BACKEND", "HH_SYNC_JOB_BACKEND"):
+    for env in ("PARSE_JOB_BACKEND", "LLM_JOB_BACKEND"):
         monkeypatch.setenv(env, "rq")
     monkeypatch.setenv("REDIS_URL", "redis://fake:6379/0")
     get_settings.cache_clear()
@@ -400,35 +398,6 @@ def test_llm_worker_fails_import_when_llm_does_not_start(fake_redis, worker_proc
         assert row.status == "error"
         assert "OPENROUTER_API_KEY не задан" in row.error_message
         assert session.query(VacancyRow).count() == 0
-
-
-def test_hh_worker_runs_queued_sync_job(fake_redis, worker_process, monkeypatch):
-    seen: dict = {}
-
-    def fake_sync(session, *, config, settings, search_window, progress_callback, **_kwargs):
-        seen["window"] = search_window
-        result = hh_sync_tasks.HhSyncResult(searched=4, unique=3, window="7d", period=7)
-        progress_callback("purge", result, 1, 1)
-        return result
-
-    monkeypatch.setattr(hh_sync_tasks, "run_hh_sync", fake_sync)
-    job_id = hh_sync_job_service.start_hh_sync_job(ResolvedHhSearchWindow(window="7d", period=7), requested_by=None)
-    assert Queue(rq_conn.HH_QUEUE_NAME, connection=fake_redis).count == 1
-
-    hh_worker.main()
-
-    with session_scope() as session:
-        row = hh_jobs.get_hh_sync_job(session, job_id)
-        assert row.status == "completed", row.error_message
-        assert row.result["searched"] == 4
-    assert seen["window"].period == 7
-    assert Queue(rq_conn.HH_QUEUE_NAME, connection=fake_redis).count == 0
-    _assert_process_lifecycle(
-        worker_process,
-        role="hh-worker",
-        queue=rq_conn.HH_QUEUE_NAME,
-        metrics_port=get_settings().hh_worker_metrics_port,
-    )
 
 
 # --- run_rq_worker: отказоустойчивость старта и очистка ---

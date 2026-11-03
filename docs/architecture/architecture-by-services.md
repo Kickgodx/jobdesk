@@ -12,13 +12,17 @@ flowchart LR
     BE["backend<br/>:9000→8000 · FastAPI<br/>API_WORKERS процессов, один — лидер"]
     PW["parse-worker<br/>RQ · :9102/metrics"]
     W["llm-worker<br/>RQ · :9101/metrics"]
-    HW["hh-worker<br/>RQ · :9103/metrics"]
     MW["maintenance-worker<br/>эмбеддинги · карта · обзор<br/>:9104/metrics"]
     CLI["CLI Typer<br/>login / db dump·import"]
   end
 
+  subgraph HHS["HH-сервис (jobdesk_hh)"]
+    HS["hh-service<br/>:8100 /v1 · :9105/metrics"]
+    HW["hh-worker<br/>RQ · :9103/metrics"]
+  end
+
   subgraph Data
-    PG[("postgres<br/>:5432")]
+    PG[("postgres<br/>:5432 · схемы public, hh")]
     RD[("redis<br/>:6379 · RQ")]
     PGB["pg-backup<br/>pg_dump + проверка"]
   end
@@ -46,10 +50,14 @@ flowchart LR
   BE -->|enqueue job_id| RD
   RD --> PW
   RD --> W
+  BE -->|"/api/v1/hh/* → /v1/* (HH_SERVICE_TOKEN)"| HS
+  HS -->|"enqueue hh"| RD
   RD --> HW
+  HS -->|"схема hh"| PG
+  HW -->|"схема hh"| PG
+  HW -->|"/internal/v1 (CORE_INTERNAL_TOKEN)"| BE
   PW --> PG
   W --> PG
-  HW --> PG
   MW --> PG
   PW --> TG
   PW --> OR
@@ -60,11 +68,13 @@ flowchart LR
   BE -->|"/metrics :9100 (лидер)"| PROM
   PW -->|"/metrics :9102"| PROM
   W -->|"/metrics :9101"| PROM
+  HS -->|"/metrics :9105"| PROM
   HW -->|"/metrics :9103"| PROM
   MW -->|"/metrics :9104"| PROM
   BE -->|"OTLP :4318"| ALLOY
   PW -->|"OTLP"| ALLOY
   W -->|"OTLP"| ALLOY
+  HS -->|"OTLP"| ALLOY
   HW -->|"OTLP"| ALLOY
   MW -->|"OTLP"| ALLOY
   ALLOY --> LOKI
@@ -82,13 +92,14 @@ flowchart LR
 | Сервис | Порт | Роль |
 |--------|------|------|
 | frontend | 5173 | Web UI |
-| backend | 9000→8000; 9100 (только Docker-сеть) | API, JWT, постановка джоб в очереди; `API_WORKERS` процессов (по умолчанию 4). Курсы ЦБ, плановая очистка и `/metrics` на :9100 — только у лидера |
+| backend | 9000→8000; 9100 (только Docker-сеть) | API, JWT, постановка джоб в очереди; `API_WORKERS` процессов (по умолчанию 4). Курсы ЦБ, плановая очистка и `/metrics` на :9100 — только у лидера. `/api/v1/hh/*` проксирует в HH-сервис; `/internal/v1/*` — внутренний API вакансий для сервисов (сервисный токен) |
 | parse-worker | 9102 (только Docker-сеть) | RQ `SimpleWorker`: прогоны парсинга (Telethon, LLM-разбор), очередь `parse`, concurrency=1 |
 | llm-worker | 9101 (только Docker-сеть) | RQ `SimpleWorker`: мэтч/письма/ручной импорт с LLM; `/metrics` без DB COUNT-collector, с `db_pool_*` |
-| hh-worker | 9103 (только Docker-сеть) | RQ `SimpleWorker`: фоновый HH sync (очередь `hh`) |
+| hh-service | 8100, 9105 (только Docker-сеть) | HH-сервис (`jobdesk_hh`, образ из цели `hh` без кода ядра): API `/v1/*` для ядра, джобы HH sync, кэш выдачи и очистка; данные — схема `hh`, миграции своей цепочкой при старте |
+| hh-worker | 9103 (только Docker-сеть) | RQ `SimpleWorker` HH-сервиса: фоновый HH sync (очередь `hh`); вакансии пишет через `/internal/v1` ядра |
 | maintenance-worker | 9104 (только Docker-сеть) | Фоновое обслуживание каталога (`MAINTENANCE_BACKEND=worker`): индексация эмбеддингов, оценки зарплат, недельный обзор рынка, карта рынка и её пересчёт по кнопке. Без RQ — свой цикл; работает одна реплика (advisory lock) |
 | redis | 6379 | Очереди RQ `llm` / `parse` / `hh` (AOF на томе `redis_data`) + pub/sub статуса SSE |
-| postgres | 5432 | Вакансии, runs, users, FX, cache, `llm_jobs` |
+| postgres | 5432 | Вакансии, runs, users, FX, cache, `llm_jobs` (схема `public`, ядро); кэш выдачи и джобы HH (схема `hh`, HH-сервис) |
 | pg-backup | — | `pg_dump` по расписанию с проверкой восстановления; состояние — файл `pg_backup.prom` в каталоге дампов |
 | prometheus | 9090 | Scrape backend + воркеры (`dns_sd`); правила алертов (`observability/alerts/`); remote-write receiver для метрик k6 (`scripts/loadtest`) и бэкапа (Alloy) |
 | alertmanager | 9093 | Сработавшие алерты Prometheus; доставки наружу нет — UI и Grafana → Alerting |

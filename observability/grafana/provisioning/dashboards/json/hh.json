@@ -246,17 +246,17 @@
       },
       "targets": [
         {
-          "expr": "db_hh_listings{job=\"jobdesk-backend\", state=\"total\"}",
+          "expr": "db_hh_listings{job=\"jobdesk-hh-service\", state=\"total\"}",
           "legendFormat": "total",
           "refId": "A"
         },
         {
-          "expr": "db_hh_listings{job=\"jobdesk-backend\", state=\"with_detail\"}",
+          "expr": "db_hh_listings{job=\"jobdesk-hh-service\", state=\"with_detail\"}",
           "legendFormat": "with_detail",
           "refId": "B"
         },
         {
-          "expr": "db_hh_listings{job=\"jobdesk-backend\", state=\"without_detail\"}",
+          "expr": "db_hh_listings{job=\"jobdesk-hh-service\", state=\"without_detail\"}",
           "legendFormat": "without_detail",
           "refId": "C"
         }
@@ -287,7 +287,7 @@
       },
       "targets": [
         {
-          "expr": "{service=~\"backend|hh-worker\"} |= \"HH \"",
+          "expr": "{service=~\"backend|hh-service|hh-worker\"} |= \"HH \"",
           "refId": "A"
         }
       ],
@@ -310,7 +310,7 @@
       },
       "targets": [
         {
-          "expr": "{service=~\"backend|hh-worker\", logger=\"jobdesk.hh.client\"} |~ \"HH (REQUEST|RESPONSE)\"",
+          "expr": "{service=~\"hh-service|hh-worker\", logger=\"jobdesk.hh.client\"} |~ \"HH (REQUEST|RESPONSE)\"",
           "refId": "A"
         }
       ],

@@ -1,12 +1,11 @@
-"""TTL purge для hh_listings."""
+"""TTL purge для hh.hh_listings."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import backend.db.models  # noqa: F401
-from backend.db import hh_repository as hh_repo
-from backend.db.models import HhListingRow
+from jobdesk_hh.db import listings as hh_repo
+from jobdesk_hh.db.models import HhListingRow
 
 
 def test_purge_expired_listings(db_session):

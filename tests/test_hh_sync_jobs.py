@@ -5,18 +5,30 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from tests.conftest import clear_settings_caches
 
-from backend.db import hh_sync_job_repository as jobs
-from backend.db.models import HhSyncJobRow
-from backend.db.session import session_scope
-from backend.services import hh_sync_job_service
-from backend.workers import hh_sync_tasks
-from backend.workers.recover_hh_sync import recover_stuck_hh_sync_jobs
+from jobdesk_hh import job_service as hh_sync_job_service
+from jobdesk_hh import tasks as hh_sync_tasks
+from jobdesk_hh.db import jobs
+from jobdesk_hh.db.models import HhSyncJobRow
+from jobdesk_hh.db.session import reset_database, session_scope
+from jobdesk_hh.recover import recover_stuck_hh_sync_jobs
 
 
 @pytest.fixture
-def db(api_client, monkeypatch):
-    """Схема из api_client; постановку в очередь записываем вместо запуска."""
+def hh_db(pg_db, monkeypatch):
+    """Схема hh тестовой базы; HH-сервис читает DATABASE_URL заново."""
+    monkeypatch.setenv("HH_SYNC_JOB_BACKEND", "inprocess")
+    clear_settings_caches()
+    reset_database()
+    yield pg_db
+    reset_database()
+    clear_settings_caches()
+
+
+@pytest.fixture
+def db(hh_db, monkeypatch):
+    """Постановку в очередь записываем вместо запуска."""
     enqueued: list = []
     monkeypatch.setattr(
         hh_sync_job_service, "enqueue_hh_sync_job", lambda job_id, traceparent=None: enqueued.append(job_id)
@@ -64,9 +76,7 @@ def test_recover_leaves_live_lease_alone(db):
 
 def test_recover_fails_job_after_max_attempts(db, monkeypatch):
     monkeypatch.setenv("HH_SYNC_JOB_MAX_ATTEMPTS", "2")
-    from backend.settings import get_settings
-
-    get_settings.cache_clear()
+    clear_settings_caches()
     job_id, _ = _running_job(attempts=2, lease_until=datetime.now(UTC) - timedelta(minutes=1))
 
     assert recover_stuck_hh_sync_jobs() == 0
@@ -150,8 +160,8 @@ def test_unexpected_error_fails_job_with_short_message(db, monkeypatch):
     assert len(row.error_message) <= 500
 
 
-def test_enqueue_failure_marks_job_failed(api_client, monkeypatch):
-    from backend.services.hh_sync_window import ResolvedHhSearchWindow
+def test_enqueue_failure_marks_job_failed(hh_db, monkeypatch):
+    from jobdesk_hh.window import ResolvedHhSearchWindow
 
     def broken(job_id, traceparent=None):
         raise ConnectionError("redis down")

@@ -1,4 +1,4 @@
-"""API HH: admin-only, 503 без токена, skip detail при повторном sync."""
+"""API HH через прокси ядра → HH-сервис: admin-only, 503 без токена, skip detail при повторном sync."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.conftest import clear_settings_caches, hh_service_stack
 
 
 @pytest.fixture
@@ -44,17 +45,16 @@ hh:
     # Пустые строки перекрывают значения из корневого .env (pydantic env_file).
     monkeypatch.setenv("HH_API_TOKEN", "")
     monkeypatch.setenv("HH_CONTACT_EMAIL", "")
-    monkeypatch.setenv("HH_SYNC_JOB_BACKEND", "inprocess")
 
     from backend.db.session import reset_engine
-    from backend.settings import get_settings
 
-    get_settings.cache_clear()
+    clear_settings_caches()
     reset_engine()
 
     from backend.main import app
 
-    with TestClient(app) as c:
+    # Ядро и HH-сервис в одном процессе: /api/v1/hh/* проксируется в сервис, тот пишет в ядро.
+    with TestClient(app) as c, hh_service_stack(monkeypatch):
         yield c
 
 
@@ -114,9 +114,7 @@ def test_hh_sync_503_without_token(client: TestClient):
 def test_hh_sync_skip_detail_on_second_run(client: TestClient, monkeypatch):
     monkeypatch.setenv("HH_API_TOKEN", "test-token")
     monkeypatch.setenv("HH_CONTACT_EMAIL", "dev@example.com")
-    from backend.settings import get_settings
-
-    get_settings.cache_clear()
+    clear_settings_caches()
 
     admin = _register(client, "admin3@example.com")
 
@@ -169,7 +167,7 @@ def test_hh_sync_skip_detail_on_second_run(client: TestClient, monkeypatch):
             assert vacancy_id == "100"
             return detail
 
-    monkeypatch.setattr("backend.services.hh_sync_service.HHClient", FakeClient)
+    monkeypatch.setattr("jobdesk_hh.sync.HHClient", FakeClient)
 
     job1 = _sync(client, admin)
     assert job1["status"] == "completed", job1
@@ -191,9 +189,7 @@ def test_hh_sync_skip_detail_on_second_run(client: TestClient, monkeypatch):
 def test_hh_sync_passes_period_for_7d(client: TestClient, monkeypatch):
     monkeypatch.setenv("HH_API_TOKEN", "test-token")
     monkeypatch.setenv("HH_CONTACT_EMAIL", "dev@example.com")
-    from backend.settings import get_settings
-
-    get_settings.cache_clear()
+    clear_settings_caches()
 
     captured: dict = {}
 
@@ -214,7 +210,7 @@ def test_hh_sync_passes_period_for_7d(client: TestClient, monkeypatch):
             captured["params"] = params
             return iter([])
 
-    monkeypatch.setattr("backend.services.hh_sync_service.HHClient", FakeClient)
+    monkeypatch.setattr("jobdesk_hh.sync.HHClient", FakeClient)
 
     admin = _register(client, "admin4@example.com")
     job = _sync(client, admin, json={"window": "7d"})
@@ -229,9 +225,7 @@ def test_hh_sync_passes_period_for_7d(client: TestClient, monkeypatch):
 def test_hh_sync_range_422_without_dates(client: TestClient, monkeypatch):
     monkeypatch.setenv("HH_API_TOKEN", "test-token")
     monkeypatch.setenv("HH_CONTACT_EMAIL", "dev@example.com")
-    from backend.settings import get_settings
-
-    get_settings.cache_clear()
+    clear_settings_caches()
 
     admin = _register(client, "admin5@example.com")
     r = client.post(
@@ -245,10 +239,8 @@ def test_hh_sync_range_422_without_dates(client: TestClient, monkeypatch):
 def _configure_hh(monkeypatch, client_cls) -> None:
     monkeypatch.setenv("HH_API_TOKEN", "test-token")
     monkeypatch.setenv("HH_CONTACT_EMAIL", "dev@example.com")
-    from backend.settings import get_settings
-
-    get_settings.cache_clear()
-    monkeypatch.setattr("backend.services.hh_sync_service.HHClient", client_cls)
+    clear_settings_caches()
+    monkeypatch.setattr("jobdesk_hh.sync.HHClient", client_cls)
 
 
 class _EmptyClient:
@@ -265,8 +257,8 @@ class _EmptyClient:
 def test_hh_sync_conflict_while_job_is_active(client: TestClient, monkeypatch):
     _configure_hh(monkeypatch, _EmptyClient)
     admin = _register(client, "admin6@example.com")
-    from backend.db import hh_sync_job_repository as jobs
-    from backend.db.session import session_scope
+    from jobdesk_hh.db import jobs
+    from jobdesk_hh.db.session import session_scope
 
     with session_scope() as session:
         jobs.create_hh_sync_job(session, params={"window": "all"}, requested_by=None)
@@ -342,8 +334,8 @@ def test_hh_sync_job_events_stream_status_then_done(client: TestClient, monkeypa
 
 
 def _queued_sync_job() -> str:
-    from backend.db import hh_sync_job_repository as hh_jobs
-    from backend.db.session import session_scope
+    from jobdesk_hh.db import jobs as hh_jobs
+    from jobdesk_hh.db.session import session_scope
 
     with session_scope() as session:
         return str(hh_jobs.create_hh_sync_job(session, params={"window": "all"}, requested_by=None).id)
@@ -412,8 +404,8 @@ def _detail(short):
 
 
 def _request_cancel_of_active_sync() -> None:
-    from backend.db import hh_sync_job_repository as hh_jobs
-    from backend.db.session import session_scope
+    from jobdesk_hh.db import jobs as hh_jobs
+    from jobdesk_hh.db.session import session_scope
 
     with session_scope() as session:
         active = next(j for j in hh_jobs.list_hh_sync_jobs(session, limit=5) if j.status == "running")
@@ -421,13 +413,12 @@ def _request_cancel_of_active_sync() -> None:
 
 
 def _hh_token(monkeypatch):
-    from backend.settings import get_settings
-    from backend.workers import hh_sync_tasks
+    from jobdesk_hh import tasks as hh_sync_tasks
 
     monkeypatch.setenv("HH_API_TOKEN", "test-token")
     monkeypatch.setenv("HH_CONTACT_EMAIL", "dev@example.com")
     monkeypatch.setenv("REDIS_URL", "")
-    get_settings.cache_clear()
+    clear_settings_caches()
     # Флаг отмены — на каждой проверке, без секундного троттлинга.
     monkeypatch.setattr(hh_sync_tasks, "_CANCEL_CHECK_INTERVAL_S", 0.0)
 
@@ -447,7 +438,7 @@ def test_hh_sync_cancel_during_details_keeps_fetched(client: TestClient, monkeyp
             _request_cancel_of_active_sync()  # отмена пришла, пока грузилась первая группа
             return _detail(next(s for s in shorts if s.id == vacancy_id))
 
-    monkeypatch.setattr("backend.services.hh_sync_service.HHClient", FakeClient)
+    monkeypatch.setattr("jobdesk_hh.sync.HHClient", FakeClient)
     admin = _register(client, "admin13@example.com")
 
     job = _sync(client, admin)
@@ -474,7 +465,7 @@ def test_hh_sync_cancel_during_search_stops_paging(client: TestClient, monkeypat
         def get_vacancy(self, vacancy_id: str):
             raise AssertionError("после отмены детали не запрашиваются")
 
-    monkeypatch.setattr("backend.services.hh_sync_service.HHClient", FakeClient)
+    monkeypatch.setattr("jobdesk_hh.sync.HHClient", FakeClient)
     admin = _register(client, "admin14@example.com")
 
     job = _sync(client, admin)
@@ -490,8 +481,8 @@ def _pages(found: int, sizes: list[int]):
 
 
 def test_collect_shorts_warns_when_hh_found_more_than_depth_limit():
-    from backend.services.hh_sync_service import _collect_shorts
     from jobdesk.config.schema import HhConfig
+    from jobdesk_hh.sync import _collect_shorts
 
     client = MagicMock()
     client.iter_vacancy_pages.return_value = _pages(5000, [100] * 20)
@@ -505,8 +496,8 @@ def test_collect_shorts_warns_when_hh_found_more_than_depth_limit():
 
 
 def test_collect_shorts_within_limit_has_no_warning():
-    from backend.services.hh_sync_service import _collect_shorts
     from jobdesk.config.schema import HhConfig
+    from jobdesk_hh.sync import _collect_shorts
 
     client = MagicMock()
     client.iter_vacancy_pages.return_value = _pages(150, [100, 50])
@@ -529,7 +520,7 @@ def test_hh_sync_result_carries_depth_warning(client: TestClient, monkeypatch):
         def get_vacancy(self, vacancy_id: str):
             return _detail(short)
 
-    monkeypatch.setattr("backend.services.hh_sync_service.HHClient", FakeClient)
+    monkeypatch.setattr("jobdesk_hh.sync.HHClient", FakeClient)
     admin = _register(client, "admin40@example.com")
 
     job = _sync(client, admin)
