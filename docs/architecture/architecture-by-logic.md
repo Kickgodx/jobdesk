@@ -33,7 +33,7 @@ flowchart LR
 
 ### Shared ingestion и AI cache (ports)
 
-- **Ingestion** — общий путь Telegram / manual import: `RawPost` → rules → optional AI → policy gates. HH sync остаётся на `hh/mapper` + `hh/dedup`.
+- **Ingestion** — общий путь Telegram / manual import: `RawPost` → rules → optional AI → policy gates. HH sync остаётся на `hh/mapper` + `hh/dedup` и живёт в HH-сервисе (`jobdesk_hh`): кэш выдачи и джобы — схема `hh`, вакансии — через внутренний API ядра.
 - **Core ports** — `backend.core_ports.register_core_ports()` при старте каждого процесса с LLM (FastAPI lifespan, `parse-worker`, `llm-worker`) регистрирует Postgres-кэш extraction (`AIExtractionCacheBackend` → `DbAIExtractionCache`) и общий лимит запросов к LLM (`GlobalRateGate` → Redis), без импорта `backend` из core. Без кэша `AIEnrichmentService` не создаётся, и разбор молча уходит в правила.
 - **Repositories** — bounded contexts: `parse_run_repository`, `vacancy_repository`, `user_content_repository`, `llm_job_repository`; `backend.db.repository` — совместимый re-export.
 
@@ -47,9 +47,11 @@ flowchart TB
   end
 
   subgraph HH["HH sync admin"]
-    H0["POST /hh/sync"] --> HQ["hh_sync_jobs 202"]
+    H0["POST /api/v1/hh/sync<br/>ядро: admin, Idempotency-Key"] --> HP["прокси → hh-service /v1/sync"]
+    HP --> HQ["hh.hh_sync_jobs 202"]
     HQ --> HR["Redis RQ hh"] --> HW["hh-worker"]
-    HW --> H1["Search listings"] --> H2["Dedup + detail"] --> H3["Mapper → vacancies"]
+    HW --> H1["Search → hh.hh_listings"] --> H2["Dedup + detail"] --> H3["Mapper → Vacancy"]
+    H3 --> HI["ядро /internal/v1: lookup + запись пачек"] --> HV["vacancies (FX)"]
     HQ --> HS["SSE / poll GET"]
   end
 

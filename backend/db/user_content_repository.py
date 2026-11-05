@@ -31,7 +31,7 @@ def count_users(session: Session) -> int:
     return int(session.scalar(select(func.count(UserRow.id))) or 0)
 
 
-# Ключ pg_advisory_xact_lock регистрации (рядом — HH_SYNC_ADVISORY_LOCK_KEY = 874_291_001).
+# Ключ pg_advisory_xact_lock регистрации (у HH-сервиса — HH_SYNC_ADVISORY_LOCK_KEY = 874_291_001).
 _REGISTRATION_LOCK_KEY = 874_291_002
 
 

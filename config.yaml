@@ -192,6 +192,10 @@ hh:
     text: >-
       Python AND (автотест* OR AQA OR "QA Automation" OR pytest OR QAA OR QA Auto
       OR "Fullstack QA" OR Automation QA OR SDET OR автоматизатор)
+    # Второй запрос на вкладке HH — то же без Python. Третий — свой текст, вводится в UI.
+    text_no_python: >-
+      автотест* OR AQA OR "QA Automation" OR pytest OR QAA OR QA Auto
+      OR "Fullstack QA" OR Automation QA OR SDET OR автоматизатор
     professional_role: ["124", "96"]
     per_page: 100
 

@@ -1,5 +1,9 @@
 # Зависимости ставятся из poetry.lock (те же версии, что проверены локально и в тестах),
 # а не по диапазонам из pyproject.toml: иначе каждая сборка тянет свежие версии.
+#
+# Цели: backend (ядро: API и воркеры parse / llm / maintenance) и hh (HH-сервис: API и
+# hh-worker). Слой зависимостей общий; код сервиса и ядра в чужой образ не попадает —
+# граница пакетов (tests/test_import_boundaries.py) держится и в рантайме.
 
 # --- 1. poetry.lock → requirements.txt с хешами (Poetry в итоговый образ не попадает)
 FROM python:3.12-slim AS requirements
@@ -13,8 +17,8 @@ RUN touch README.md \
     && poetry check --lock \
     && poetry export --only main --format requirements.txt --output requirements.txt
 
-# --- 2. образ backend
-FROM python:3.12-slim
+# --- 2. общий слой: системные пакеты и зависимости по lock
+FROM python:3.12-slim AS base
 
 WORKDIR /app
 
@@ -25,18 +29,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=requirements /src/requirements.txt ./
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
-COPY pyproject.toml README.md alembic.ini ./
+COPY pyproject.toml README.md ./
 COPY jobdesk ./jobdesk
-COPY backend ./backend
-COPY alembic ./alembic
+COPY jobdesk_platform ./jobdesk_platform
 COPY config.yaml llm_models.yaml ./
+
+ENV PYTHONUNBUFFERED=1
+ENV LOG_DIR=
+
+# --- 3. HH-сервис
+FROM base AS hh
+
+COPY jobdesk_hh ./jobdesk_hh
 
 # Сам проект — без зависимостей: они уже стоят ровно по lock.
 RUN pip install --no-cache-dir --no-deps -e . \
     && pip check
 
-ENV PYTHONUNBUFFERED=1
-ENV LOG_DIR=
+EXPOSE 8100
+
+CMD ["jobdesk-hh-service"]
+
+# --- 4. ядро (последняя цель — образ по умолчанию для docker build без --target)
+FROM base AS backend
+
+COPY alembic.ini ./
+COPY backend ./backend
+COPY alembic ./alembic
+
+RUN pip install --no-cache-dir --no-deps -e . \
+    && pip check
 
 EXPOSE 8000
 

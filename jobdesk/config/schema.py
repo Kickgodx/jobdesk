@@ -1016,16 +1016,22 @@ class RetentionConfig(BaseModel):
     )
 
 
-DEFAULT_HH_SEARCH_TEXT = (
-    'Python AND (автотест* OR AQA OR "QA Automation" OR pytest OR QAA OR QA Auto '
+_HH_AQA_TERMS = (
+    '(автотест* OR AQA OR "QA Automation" OR pytest OR QAA OR QA Auto '
     'OR "Fullstack QA" OR Automation QA OR SDET OR автоматизатор)'
 )
+DEFAULT_HH_SEARCH_TEXT = f"Python AND {_HH_AQA_TERMS}"
+DEFAULT_HH_SEARCH_TEXT_NO_PYTHON = _HH_AQA_TERMS
 
 
 class HhSearchConfig(BaseModel):
     """Параметры GET /vacancies для HH sync."""
 
-    text: str = Field(default=DEFAULT_HH_SEARCH_TEXT)
+    text: str = Field(default=DEFAULT_HH_SEARCH_TEXT, description="Основной запрос (query=main).")
+    text_no_python: str = Field(
+        default=DEFAULT_HH_SEARCH_TEXT_NO_PYTHON,
+        description="Запрос без слова Python (query=no_python).",
+    )
     professional_role: list[str] = Field(default_factory=lambda: ["124", "96"])
     per_page: int = Field(default=100, ge=1, le=100)
 

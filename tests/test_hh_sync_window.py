@@ -1,6 +1,6 @@
 import pytest
 
-from backend.services.hh_sync_window import HhSyncWindowError, resolve_hh_search_window
+from jobdesk_hh.window import HhSyncWindowError, resolve_hh_search_window
 
 
 def test_default_and_all():

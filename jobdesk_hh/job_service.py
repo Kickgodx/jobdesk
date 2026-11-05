@@ -1,4 +1,4 @@
-"""Запуск фонового HH sync: строка ``hh_sync_jobs`` + enqueue (RQ ``hh``) или поток в API."""
+"""Запуск фонового HH sync: строка ``hh.hh_sync_jobs`` + enqueue (RQ ``hh``) или поток в процессе сервиса."""
 
 from __future__ import annotations
 
@@ -8,13 +8,14 @@ import uuid
 
 from sqlalchemy.exc import IntegrityError
 
-from backend.db import hh_sync_job_repository as jobs
-from backend.db.session import session_scope
-from backend.errors import CODE_CONFLICT_ACTIVE_RUN, AppError
-from backend.services.hh_sync_events import publish_hh_sync_event
-from backend.services.hh_sync_window import ResolvedHhSearchWindow
-from backend.settings import get_settings
-from backend.tracing import current_traceparent
+from jobdesk_hh.db import jobs
+from jobdesk_hh.db.session import session_scope
+from jobdesk_hh.events import publish_hh_sync_event
+from jobdesk_hh.query import ResolvedHhSearchQuery
+from jobdesk_hh.settings import get_hh_settings
+from jobdesk_hh.window import ResolvedHhSearchWindow
+from jobdesk_platform.errors import CODE_CONFLICT_ACTIVE_RUN, AppError
+from jobdesk_platform.tracing import current_traceparent
 
 _LOG = logging.getLogger(__name__)
 
@@ -27,11 +28,11 @@ def _conflict() -> AppError:
 
 def enqueue_hh_sync_job(job_id: uuid.UUID, traceparent: str | None = None) -> None:
     """Отправить ``queued``-джобу исполнителю. Бросает исключение, если очередь недоступна."""
-    from backend.workers.hh_sync_tasks import run_hh_sync_job
+    from jobdesk_hh.tasks import run_hh_sync_job
 
-    settings = get_settings()
+    settings = get_hh_settings()
     if settings.hh_sync_job_backend_normalized == "rq":
-        from backend.queue.rq_conn import get_hh_queue
+        from jobdesk_hh.queue import get_hh_queue
 
         rq_job = get_hh_queue().enqueue(
             run_hh_sync_job,
@@ -71,7 +72,7 @@ def cancel_hh_sync_job(job_id: uuid.UUID) -> bool:
             try:
                 from rq.job import Job
 
-                from backend.queue.rq_conn import get_redis_connection
+                from jobdesk_hh.queue import get_redis_connection
 
                 Job.fetch(rq_job_id, connection=get_redis_connection()).cancel()
             except Exception as e:
@@ -82,14 +83,25 @@ def cancel_hh_sync_job(job_id: uuid.UUID) -> bool:
     return True
 
 
-def start_hh_sync_job(window: ResolvedHhSearchWindow, *, requested_by: int | None) -> uuid.UUID:
-    """Создать джобу и поставить в очередь. 409, если sync уже активен."""
+def start_hh_sync_job(
+    window: ResolvedHhSearchWindow,
+    query: ResolvedHhSearchQuery | None = None,
+    *,
+    requested_by: int | None,
+) -> uuid.UUID:
+    """Создать джобу и поставить в очередь. 409, если sync уже активен.
+
+    Без ``query`` воркер возьмёт основной запрос ``hh.search.text`` на момент запуска.
+    """
     params = {
         "window": window.window,
         "period": window.period,
         "date_from": window.date_from,
         "date_to": window.date_to,
     }
+    if query is not None:
+        params["query"] = query.query
+        params["text"] = query.text
     with session_scope() as session:
         if jobs.has_active_hh_sync_job(session):
             raise _conflict()

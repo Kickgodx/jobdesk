@@ -228,7 +228,7 @@ def test_api_start_recovers_queued_run_inprocess(monkeypatch, default_test_confi
 
     stops = _start_inprocess_job_recovery()
     try:
-        assert len(stops) == 3  # parse + llm + hh sync, все backend'ы inprocess
+        assert len(stops) == 2  # parse + llm; HH sync восстанавливает HH-сервис
         assert _wait_for_status(rid, "completed") == "completed"
     finally:
         for stop in stops:

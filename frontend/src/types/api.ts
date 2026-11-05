@@ -276,6 +276,7 @@ export interface HhStatus {
   email_configured: boolean;
   listing_ttl_days: number;
   search_text: string;
+  search_text_no_python: string;
   professional_role: string[];
   listings_total: number;
   listings_with_detail: number;
@@ -284,10 +285,15 @@ export interface HhStatus {
 
 export type HhSyncWindow = "all" | "7d" | "14d" | "30d" | "range";
 
+/** main / no_python — запросы из hh.search конфига; custom — свой текст в text. */
+export type HhSearchQuery = "main" | "no_python" | "custom";
+
 export interface HhSyncRequest {
   window?: HhSyncWindow;
   date_from?: string;
   date_to?: string;
+  query?: HhSearchQuery;
+  text?: string;
 }
 
 export type HhSyncJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -321,6 +327,9 @@ export interface HhSyncJob {
   period: number | null;
   date_from: string | null;
   date_to: string | null;
+  query: HhSearchQuery;
+  /** Текст запроса к HH; null — у sync, запущенных до появления выбора запроса. */
+  search_text: string | null;
   progress: HhSyncProgress | null;
   result: HhSyncResult | null;
   error_message: string | null;
@@ -352,6 +361,8 @@ export interface HhSyncResult {
   period: number | null;
   date_from: string | null;
   date_to: string | null;
+  query: HhSearchQuery;
+  search_text: string | null;
 }
 
 export interface TokenResponse {

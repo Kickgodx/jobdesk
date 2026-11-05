@@ -8,10 +8,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.db import hh_repository as hh_repo
-from backend.services import hh_sync_service
-from backend.settings import Settings
 from jobdesk.config.schema import AppConfig, HhConfig, HhSearchConfig
+from jobdesk_hh import sync as hh_sync_service
+from jobdesk_hh.db import listings as hh_repo
+from jobdesk_hh.settings import HhSettings
 
 
 class _FakeConn:
@@ -122,7 +122,7 @@ class _RecordingLock:
 def recording_lock(monkeypatch):
     _RecordingLock.instances = []
     _RecordingLock.acquired = True
-    monkeypatch.setattr(hh_sync_service.hh_repo, "HhSyncDbLock", _RecordingLock)
+    monkeypatch.setattr(hh_sync_service.listings, "HhSyncDbLock", _RecordingLock)
     return _RecordingLock
 
 
@@ -130,8 +130,8 @@ def _sync():
     config = AppConfig(
         hh=HhConfig(enabled=True, search=HhSearchConfig(text="Python", professional_role=["124"], per_page=100))
     )
-    settings = Settings(HH_API_TOKEN="t", HH_CONTACT_EMAIL="a@b.c")
-    return hh_sync_service.run_hh_sync(MagicMock(), config=config, settings=settings)
+    settings = HhSettings(HH_API_TOKEN="t", HH_CONTACT_EMAIL="a@b.c")
+    return hh_sync_service.run_hh_sync(MagicMock(), config=config, settings=settings, core=MagicMock())
 
 
 def test_sync_releases_lock_when_it_fails(monkeypatch, recording_lock):

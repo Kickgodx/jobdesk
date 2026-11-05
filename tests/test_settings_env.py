@@ -8,9 +8,13 @@ from pydantic import ValidationError
 from backend.settings import Settings, check_api_workers, check_exposure
 
 _PROD_SECRET = "x" * 32
+_PROD_TOKEN = "t" * 32
 _ENV_KEYS = (
     "APP_ENV",
     "JWT_SECRET",
+    "CORE_INTERNAL_TOKEN",
+    "HH_SERVICE_URL",
+    "HH_SERVICE_TOKEN",
     "AUTH_REGISTRATION_OPEN",
     "HTTP_LOG_BODIES",
     "API_HOST",
@@ -20,7 +24,6 @@ _ENV_KEYS = (
     "POSTGRES_PASSWORD",
     "PARSE_JOB_BACKEND",
     "LLM_JOB_BACKEND",
-    "HH_SYNC_JOB_BACKEND",
     "MAINTENANCE_BACKEND",
     "API_WORKERS",
     "REDIS_URL",
@@ -36,6 +39,8 @@ def make_settings(monkeypatch):
     def _make(**env: str) -> Settings:
         for key in _ENV_KEYS:
             monkeypatch.delenv(key, raising=False)
+        # Токен ядра обязателен в prod; тесты про него передают значение явно.
+        env.setdefault("CORE_INTERNAL_TOKEN", _PROD_TOKEN)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         return Settings(_env_file=None)
@@ -125,15 +130,14 @@ def test_unknown_job_backend_is_rejected(make_settings):
     [(" RQ ", "rq"), ("Inprocess", "inprocess"), ("", "inprocess"), ("  ", "inprocess")],
 )
 def test_job_backend_ignores_case_and_spaces(make_settings, raw, expected):
-    s = make_settings(PARSE_JOB_BACKEND=raw, LLM_JOB_BACKEND=raw, HH_SYNC_JOB_BACKEND=raw)
+    s = make_settings(PARSE_JOB_BACKEND=raw, LLM_JOB_BACKEND=raw)
     assert s.parse_job_backend_normalized == expected
     assert s.llm_job_backend_normalized == expected
-    assert s.hh_sync_job_backend_normalized == expected
 
 
 def test_job_backend_defaults_to_inprocess(make_settings):
     s = make_settings()
-    assert (s.parse_job_backend, s.llm_job_backend, s.hh_sync_job_backend) == ("inprocess",) * 3
+    assert (s.parse_job_backend, s.llm_job_backend) == ("inprocess",) * 2
 
 
 def test_dev_on_loopback_starts(make_settings):
@@ -186,7 +190,6 @@ _MULTI_OK = {
     "JWT_SECRET": _PROD_SECRET,
     "PARSE_JOB_BACKEND": "rq",
     "LLM_JOB_BACKEND": "rq",
-    "HH_SYNC_JOB_BACKEND": "rq",
 }
 
 
@@ -214,7 +217,6 @@ def test_several_api_workers_with_shared_state_start(make_settings):
         ({"JWT_SECRET": ""}, "JWT_SECRET"),
         ({"LLM_JOB_BACKEND": "inprocess"}, "LLM_JOB_BACKEND"),
         ({"PARSE_JOB_BACKEND": "inprocess"}, "PARSE_JOB_BACKEND"),
-        ({"HH_SYNC_JOB_BACKEND": "inprocess"}, "HH_SYNC_JOB_BACKEND"),
     ],
 )
 def test_several_api_workers_require_shared_state(make_settings, drop, named):
@@ -256,3 +258,33 @@ def test_unknown_maintenance_backend_is_rejected(make_settings):
     with pytest.raises(ValidationError) as exc:
         make_settings(MAINTENANCE_BACKEND="rq")
     assert "MAINTENANCE_BACKEND" in str(exc.value)
+
+
+# --- сервисные токены (platform/internal-services) -------------------------------------
+
+
+@pytest.mark.parametrize("token", ["", "short-token"])
+def test_prod_requires_core_internal_token(make_settings, token):
+    with pytest.raises(ValidationError, match="CORE_INTERNAL_TOKEN") as exc:
+        make_settings(APP_ENV="prod", JWT_SECRET=_PROD_SECRET, CORE_INTERNAL_TOKEN=token)
+    if token:
+        assert token not in str(exc.value)
+
+
+def test_prod_requires_hh_service_token_only_with_hh_url(make_settings):
+    assert make_settings(APP_ENV="prod", JWT_SECRET=_PROD_SECRET).hh_service_token is None
+    with pytest.raises(ValidationError, match="HH_SERVICE_TOKEN"):
+        make_settings(APP_ENV="prod", JWT_SECRET=_PROD_SECRET, HH_SERVICE_URL="http://hh-service:8100")
+    s = make_settings(
+        APP_ENV="prod", JWT_SECRET=_PROD_SECRET, HH_SERVICE_URL="http://hh-service:8100", HH_SERVICE_TOKEN=_PROD_TOKEN
+    )
+    assert s.hh_service_token == _PROD_TOKEN
+
+
+def test_dev_service_tokens_default_to_shared_dev_values(make_settings):
+    from jobdesk_platform.service_tokens import DEV_CORE_INTERNAL_TOKEN, DEV_HH_SERVICE_TOKEN
+
+    s = make_settings(CORE_INTERNAL_TOKEN="")
+    assert s.core_internal_token == DEV_CORE_INTERNAL_TOKEN
+    assert s.hh_service_token == DEV_HH_SERVICE_TOKEN
+    assert s.hh_service_url is None

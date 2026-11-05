@@ -212,3 +212,61 @@ def test_post_workers_inherit_parent_span(exporter):
         results = [f.result() for f in [_submit_in_context(pool, process_one, p) for p in [1, 2, 3, 4]]]
     assert results == [1, 2, 3, 4]
     assert seen == [parent.get_span_context().trace_id] * 4
+
+
+def test_trace_crosses_core_hh_service_boundary(exporter, hh_client, monkeypatch):
+    """Вызов ядра → HH-сервис → фоновая джоба sync: одна трасса (platform/internal-services).
+
+    Запрос к сервису идёт в пустом ``contextvars``-контексте: как у отдельного процесса, связь
+    с трассой ядра — только заголовок ``traceparent``, который ставит клиент.
+    """
+    import contextvars
+    import time as _time
+
+    import httpx
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from tests.conftest import clear_settings_caches
+
+    from backend.services import hh_service_client
+    from jobdesk.contracts.hh_service import SYNC_PATH, HhSyncAccepted, HhSyncJobOut, sync_job_path
+    from jobdesk_hh import tasks
+    from jobdesk_hh.api import app as hh_app
+
+    monkeypatch.setenv("HH_API_TOKEN", "t")
+    monkeypatch.setenv("HH_CONTACT_EMAIL", "a@b.c")
+    clear_settings_caches()
+    monkeypatch.setattr(tasks, "run_hh_sync", lambda session, **kw: tasks.HhSyncResult())
+
+    class FreshContext(httpx.BaseTransport):
+        def __init__(self, inner: httpx.BaseTransport) -> None:
+            self._inner = inner
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            return contextvars.Context().run(self._inner.handle_request, request)
+
+    hh_service_client.set_client_overrides(
+        httpx.Client(base_url="http://testserver", transport=FreshContext(TestClient(hh_app)._transport))
+    )
+    FastAPIInstrumentor.instrument_app(hh_app, tracer_provider=trace.get_tracer_provider())
+    hh_app.middleware_stack = hh_app.build_middleware_stack()
+    try:
+        with trace.get_tracer("test").start_as_current_span("core.request") as root:
+            accepted = hh_service_client.call(
+                "POST", SYNC_PATH, model=HhSyncAccepted, json={}, user_id=1, idempotent=False
+            )
+        deadline = _time.monotonic() + 10
+        while _time.monotonic() < deadline:
+            job = hh_service_client.call("GET", sync_job_path(accepted.job_id), model=HhSyncJobOut, idempotent=True)
+            if job.status == "completed":
+                break
+            _time.sleep(0.05)
+        assert job.status == "completed"
+    finally:
+        FastAPIInstrumentor.uninstrument_app(hh_app)
+
+    trace_id = root.get_span_context().trace_id
+    spans = exporter.get_finished_spans()
+    service_spans = [s for s in spans if s.kind == SpanKind.SERVER and s.context.trace_id == trace_id]
+    assert [s.name for s in service_spans if s.name == f"POST {SYNC_PATH}"], [s.name for s in spans]
+    (job_span,) = [s for s in spans if s.name == "hh_sync_job"]
+    assert job_span.context.trace_id == trace_id

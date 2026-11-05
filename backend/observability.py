@@ -326,66 +326,6 @@ def record_fx_fetch(outcome: str) -> None:
     FX_CBR_REQUESTS.labels(outcome=outcome).inc()
 
 
-# --- HH.ru sync --------------------------------------------------------------
-
-HH_SYNCS = Counter(
-    "hh_syncs_total",
-    "Завершённые синхронизации HH",
-    labelnames=("outcome",),  # success | cancelled | api_error | not_configured | error
-)
-
-HH_SYNC_DURATION = Histogram(
-    "hh_sync_duration_seconds",
-    "Длительность HH sync (wall time)",
-    buckets=(5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 3600.0),
-)
-
-HH_SEARCHED = Counter(
-    "hh_vacancies_searched_total",
-    "Вакансий получено из поиска HH",
-)
-
-HH_DETAILS = Counter(
-    "hh_details_total",
-    "Запросы detail к HH API",
-    labelnames=("result",),  # fetched | skipped
-)
-
-HH_API_ERRORS = Counter(
-    "hh_api_errors_total",
-    "Ошибки HH API",
-    labelnames=("status",),
-)
-
-HH_LISTINGS_PURGED = Counter(
-    "hh_listings_purged_total",
-    "Строк hh_listings удалено по TTL",
-)
-
-
-def record_hh_sync_finished(*, outcome: str, duration_seconds: float, searched: int) -> None:
-    HH_SYNCS.labels(outcome=outcome or "unknown").inc()
-    HH_SYNC_DURATION.observe(max(duration_seconds, 0.0))
-    if searched > 0:
-        HH_SEARCHED.inc(searched)
-
-
-def record_hh_details(*, fetched: int, skipped: int) -> None:
-    if fetched > 0:
-        HH_DETAILS.labels(result="fetched").inc(fetched)
-    if skipped > 0:
-        HH_DETAILS.labels(result="skipped").inc(skipped)
-
-
-def record_hh_api_error(*, status: str) -> None:
-    HH_API_ERRORS.labels(status=status or "unknown").inc()
-
-
-def record_hh_listings_purged(count: int) -> None:
-    if count > 0:
-        HH_LISTINGS_PURGED.inc(count)
-
-
 # Нули для известных лейблов (как у PARSE_RUNS выше): серия, появившаяся сразу с 1,
 # для increase()/rate() — прирост 0, и первое событие после старта процесса не видно.
 for _status in ("created", "exists", "not_vacancy", "error"):
@@ -407,10 +347,6 @@ for _event, _outcomes in (
 for _status in ("running", "queued"):
     LLM_JOBS_RECOVER.labels(from_status=_status)
     PARSE_JOBS_RECOVER.labels(from_status=_status)
-for _outcome in ("success", "cancelled", "api_error", "not_configured", "error"):
-    HH_SYNCS.labels(outcome=_outcome)
-for _result in ("fetched", "skipped"):
-    HH_DETAILS.labels(result=_result)
 
 
 def init_llm_job_series(kinds, *, backend: str | None = None) -> None:
@@ -525,6 +461,7 @@ class _DBPoolCollector:
 # --- Агрегаты БД на scrape ---------------------------------------------------
 
 
+# hh_sync — у HH-сервиса (jobdesk_hh.observability), то же имя метрики.
 _JOBS_LEASE_EXPIRED_HELP = "Фоновые задачи в running с истёкшим или пустым lease (parse | llm | hh_sync)"
 
 
@@ -574,7 +511,6 @@ class _DBStatsCollector:
             "Сумма posts_fetched у прогонов, завершённых за 24 ч",
         )
         yield GaugeMetricFamily("fx_latest_rate_timestamp_seconds", "Дата последнего курса ЦБ (unix time)")
-        yield GaugeMetricFamily("db_hh_listings", "Кэш HH listings", labels=["state"])
         yield GaugeMetricFamily("llm_jobs_by_status", "LLM-джобы в БД по статусу", labels=["status"])
         yield GaugeMetricFamily("db_jobs_lease_expired", _JOBS_LEASE_EXPIRED_HELP, labels=["kind"])
 
@@ -586,7 +522,6 @@ class _DBStatsCollector:
                 runs_finished_24h,
                 posts_fetched_24h,
                 fx_latest_ts,
-                hh_listings,
                 llm_jobs_by_status,
                 jobs_lease_expired,
             ) = self._read_db_cached()
@@ -650,12 +585,6 @@ class _DBStatsCollector:
                 value=fx_latest_ts,
             )
 
-        fam = GaugeMetricFamily("db_hh_listings", "Кэш HH listings", labels=["state"])
-        fam.add_metric(["total"], hh_listings["total"])
-        fam.add_metric(["with_detail"], hh_listings["with_detail"])
-        fam.add_metric(["without_detail"], hh_listings["without_detail"])
-        yield fam
-
         fam = GaugeMetricFamily("llm_jobs_by_status", "LLM-джобы в БД по статусу", labels=["status"])
         for status, n in llm_jobs_by_status.items():
             fam.add_metric([status], n)
@@ -675,7 +604,6 @@ class _DBStatsCollector:
         float | None,
         dict[str, int],
         dict[str, int],
-        dict[str, int],
     ]:
         from datetime import timedelta
 
@@ -685,8 +613,6 @@ class _DBStatsCollector:
             AIExtractionCacheRow,
             CoverLetterRow,
             ExchangeRateRow,
-            HhListingRow,
-            HhSyncJobRow,
             LlmJobRow,
             ParseRunRow,
             ResumeRow,
@@ -701,7 +627,6 @@ class _DBStatsCollector:
         runs_finished_24h: dict[str, int] = {}
         posts_fetched_24h = 0
         fx_latest_ts: float | None = None
-        hh_listings = {"total": 0, "with_detail": 0, "without_detail": 0}
         llm_jobs_by_status: dict[str, int] = {}
         jobs_lease_expired: dict[str, int] = {}
         since = datetime.now(UTC) - timedelta(hours=24)
@@ -744,26 +669,13 @@ class _DBStatsCollector:
             if latest is not None:
                 fx_latest_ts = datetime(latest.year, latest.month, latest.day, tzinfo=UTC).timestamp()
 
-            hh_total = int(s.scalar(select(func.count()).select_from(HhListingRow)) or 0)
-            hh_with = int(
-                s.scalar(
-                    select(func.count()).select_from(HhListingRow).where(HhListingRow.detail_fetched_at.is_not(None))
-                )
-                or 0
-            )
-            hh_listings = {
-                "total": hh_total,
-                "with_detail": hh_with,
-                "without_detail": hh_total - hh_with,
-            }
-
             for status, n in s.execute(select(LlmJobRow.status, func.count()).group_by(LlmJobRow.status)):
                 llm_jobs_by_status[str(status)] = int(n)
 
             # running с истёкшим lease: recover (раз в JOB_RECOVER_INTERVAL_SECONDS) такую
             # задачу возвращает в очередь — долго висящая значит, что recover не работает.
             db_now = func.now()
-            for kind, model in (("parse", ParseRunRow), ("llm", LlmJobRow), ("hh_sync", HhSyncJobRow)):
+            for kind, model in (("parse", ParseRunRow), ("llm", LlmJobRow)):
                 jobs_lease_expired[kind] = int(
                     s.scalar(
                         select(func.count())
@@ -782,7 +694,6 @@ class _DBStatsCollector:
             runs_finished_24h,
             posts_fetched_24h,
             fx_latest_ts,
-            hh_listings,
             llm_jobs_by_status,
             jobs_lease_expired,
         )

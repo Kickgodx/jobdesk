@@ -24,6 +24,7 @@ from backend.api.routes import (
     fx,
     health,
     hh,
+    internal,
     llm_jobs,
     market_chat,
     market_map,
@@ -32,8 +33,8 @@ from backend.api.routes import (
     vacancies,
 )
 from backend.db import fx_repository as fx_repo
-from backend.db import hh_repository as hh_repo
 from backend.db import repository as repo
+from backend.db import vacancy_repository as vacancy_repo
 from backend.db.company_profile import backfill_company_keys
 from backend.db.session import init_db, session_scope
 from backend.errors import register_exception_handlers
@@ -75,15 +76,17 @@ def _sync_fx_on_startup() -> None:
 
 
 def _cleanup_expired_vacancies() -> None:
-    """Применить TTL вакансий (архивацию), кэш HH listings, бэкфилл грейдов HH и ключей компаний."""
+    """Применить TTL вакансий (архивацию), бэкфилл грейдов HH и ключей компаний.
+
+    Кэш выдачи HH и историю HH sync чистит HH-сервис (``jobdesk_hh.maintenance``).
+    """
     try:
         with session_scope() as session:
             repo.archive_expired_vacancies(session)
-            hh_repo.purge_expired_listings(session)
-            hh_repo.backfill_hh_grades_from_experience(session)
+            vacancy_repo.backfill_hh_grades_from_experience(session)
             backfill_company_keys(session)
     except Exception as e:
-        logging.getLogger(__name__).warning("TTL вакансий/HH listings не применён: %s", e)
+        logging.getLogger(__name__).warning("TTL вакансий не применён: %s", e)
 
 
 def _periodic_cleanup() -> None:
@@ -155,7 +158,6 @@ def _start_inprocess_job_recovery() -> list[threading.Event]:
     409 CONFLICT_ACTIVE_RUN), а LLM-джобы съедают лимит пользователя.
     """
     from backend.workers.recover import recover_stuck_llm_jobs
-    from backend.workers.recover_hh_sync import recover_stuck_hh_sync_jobs
     from backend.workers.recover_loop import start_periodic_recover
     from backend.workers.recover_parse import recover_stuck_parse_runs
 
@@ -165,7 +167,6 @@ def _start_inprocess_job_recovery() -> list[threading.Event]:
     for job_backend, recover_fn, name in (
         (settings.parse_job_backend_normalized, recover_stuck_parse_runs, "parse-recover-loop"),
         (settings.llm_job_backend_normalized, recover_stuck_llm_jobs, "llm-recover-loop"),
-        (settings.hh_sync_job_backend_normalized, recover_stuck_hh_sync_jobs, "hh-recover-loop"),
     ):
         if job_backend != "inprocess":
             continue
@@ -332,6 +333,8 @@ app.include_router(resumes.resumes_router, prefix="/api/v1")
 app.include_router(llm_jobs.router, prefix="/api/v1")
 app.include_router(market_chat.router, prefix="/api/v1")
 app.include_router(market_map.router, prefix="/api/v1")
+# Внутренний API для сервисов — вне /api/v1 (наружу не проксируется), с сервисным токеном.
+app.include_router(internal.router)
 
 # Только сбор HTTP-метрик в REGISTRY; отдаёт их сервер на API_METRICS_PORT (_start_metrics_server).
 Instrumentator(

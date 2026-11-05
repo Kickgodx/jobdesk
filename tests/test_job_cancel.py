@@ -39,9 +39,10 @@ def test_migration_adds_cancel_requested(pg_empty_db):
     command.upgrade(cfg, "head")
     with engine.begin() as conn:
         assert conn.execute(text("SELECT cancel_requested FROM llm_jobs")).scalar_one() is False
-        assert conn.execute(text("SELECT cancel_requested FROM hh_sync_jobs")).scalar_one() is False
+        # На head таблица HH sync — в схеме hh (миграция 054); downgrade возвращает её в public.
+        assert conn.execute(text("SELECT cancel_requested FROM hh.hh_sync_jobs")).scalar_one() is False
         conn.execute(text("UPDATE llm_jobs SET status = 'cancelled', cancel_requested = true"))
-        conn.execute(text("UPDATE hh_sync_jobs SET status = 'cancelled', cancel_requested = true"))
+        conn.execute(text("UPDATE hh.hh_sync_jobs SET status = 'cancelled', cancel_requested = true"))
 
     command.downgrade(cfg, "030_llm_results_requested_model")
     with engine.connect() as conn:

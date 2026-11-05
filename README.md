@@ -10,7 +10,7 @@
 > база и роль Postgres `tgjobs`, тома Docker `tg_jobs_parser_*` (имя compose-проекта закреплено),
 > префикс персональных токенов `tgj_`; MCP-сервер по-прежнему читает и env `TGJOBS_*`.
 
-**Основной способ работы** — веб-интерфейс на **React** + **FastAPI** backend + **PostgreSQL** + **Redis** / `parse-worker` + `llm-worker` + `hh-worker` (Docker Compose). Парсинг ставится в очередь RQ, прогресс пишется в БД (SSE + poll), вакансии сохраняются в PostgreSQL.
+**Основной способ работы** — веб-интерфейс на **React** + **FastAPI** backend + **PostgreSQL** + **Redis** / `parse-worker` + `llm-worker` + HH-сервис `hh-service` + `hh-worker` (Docker Compose). Парсинг ставится в очередь RQ, прогресс пишется в БД (SSE + poll), вакансии сохраняются в PostgreSQL.
 
 Дополнительно — **CLI (Typer)** для первой авторизации Telethon, дампа/импорта БД и отладки без UI.
 
@@ -46,7 +46,7 @@ docker compose up --build
 | **PostgreSQL** | `127.0.0.1:5432` (user/pass/db: `tgjobs` / `tgjobs` / `tgjobs`) |
 | **Redis** | `127.0.0.1:16379` → контейнер `:6379` (очереди RQ: parse + LLM) |
 
-В compose backend слушает контейнерный `:8000`, на хост проброшен **`9000`**. Сервис `parse-worker` (тот же образ, команда `jobdesk-parse-worker`) выполняет прогоны парсинга через RQ (очередь `parse`, concurrency=1, volume `sessions/` для Telethon); метрики — контейнерный `:9102` (на хост не публикуется). Сервис `llm-worker` (`jobdesk-llm-worker`) обрабатывает матчинг и письма; метрики — `:9101` (тоже без host mapping, чтобы работал `--scale`). Сервис `hh-worker` (`jobdesk-hh-worker`, очередь `hh`) выполняет HH sync; метрики — `:9103`. Сервис `maintenance-worker` (`jobdesk-maintenance-worker`) — фоновое обслуживание каталога (см. ниже); метрики — `:9104`. Redis хранит очереди на томе `redis_data` с AOF (`appendonly yes`): рестарт контейнера их не теряет.
+В compose backend слушает контейнерный `:8000`, на хост проброшен **`9000`**. Сервис `parse-worker` (тот же образ, команда `jobdesk-parse-worker`) выполняет прогоны парсинга через RQ (очередь `parse`, concurrency=1, volume `sessions/` для Telethon); метрики — контейнерный `:9102` (на хост не публикуется). Сервис `llm-worker` (`jobdesk-llm-worker`) обрабатывает матчинг и письма; метрики — `:9101` (тоже без host mapping, чтобы работал `--scale`). HH sync — отдельный HH-сервис (пакет `jobdesk_hh`, образ из цели `hh` в `Dockerfile.backend`, без кода ядра): `hh-service` (`jobdesk-hh-service`, API `/v1/*` на `:8100` только в Docker-сети, метрики `:9105`) принимает запросы, которые ядро проксирует с `/api/v1/hh/*`, а `hh-worker` (`jobdesk-hh-worker`, очередь `hh`) выполняет sync; метрики — `:9103`. Данные сервиса — схема `hh` той же базы (миграции — своя цепочка, сервис применяет их при старте), вакансии он читает и пишет только через внутренний API ядра `/internal/v1/*`. HH-сервис не запущен — `/api/v1/hh/*` отвечают 503 `UPSTREAM_UNAVAILABLE`, остальное работает. Сервис `maintenance-worker` (`jobdesk-maintenance-worker`) — фоновое обслуживание каталога (см. ниже); метрики — `:9104`. Redis хранит очереди на томе `redis_data` с AOF (`appendonly yes`): рестарт контейнера их не теряет.
 
 Полный стек (Prometheus, Grafana, Loki, Alloy, Tempo) включается профилем
 `observability` через `COMPOSE_PROFILES=observability` в `.env` (уже есть в
@@ -84,8 +84,11 @@ docker compose exec backend python -m jobdesk.cli login --config /app/config.yam
 TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
 OPENROUTER_API_KEY=...          # если ai.enabled в config.yaml
-HH_API_TOKEN=...                # Bearer-токен HH (admin sync); без client_credentials
-HH_CONTACT_EMAIL=you@example.com  # для User-Agent HH API
+HH_API_TOKEN=...                # Bearer-токен HH (admin sync); без client_credentials — читает HH-сервис
+HH_CONTACT_EMAIL=you@example.com  # для User-Agent HH API — читает HH-сервис
+# Сервисные токены (ядро ↔ HH-сервис); в dev — общие dev-значения, в APP_ENV=prod обязательны (≥32 символа)
+CORE_INTERNAL_TOKEN=...         # ядро принимает от сервисов (/internal/v1)
+HH_SERVICE_TOKEN=...            # HH-сервис принимает от ядра (/v1)
 
 # Пароли инфраструктуры compose — обязательны, без них `docker compose` не стартует.
 # Только [A-Za-z0-9_-]: python -c "import secrets; print(secrets.token_urlsafe(24))"
@@ -198,7 +201,7 @@ JWT_SECRET=...        # python -c "import secrets; print(secrets.token_urlsafe(4
 | **Парсинг** | Форма парсинга (каналы, даты, специализации, формат работы, AI, пороги score); запуск и очистка кэша LLM — только для админа |
 | **Прогон** | Статус «В очереди» → running; прогресс (SSE / poll из БД, переживает F5 и рестарт API), метрики, топ-5 каналов по числу пропущенных постов (кандидаты в мусорные источники), графики, AI (токены), таблица, экспорт |
 | **Импорт** | `/import` — вставка текста вакансии вручную (например, с hh.ru): rules + LLM-разбор (фоновой джобой, с прогрессом) и запись в общую базу; ниже — последние импортированные |
-| **HH** | `/hh` — только для админа: sync вакансий с HH.ru (поиск AQA/Python), без LLM; кэш listings + skip detail |
+| **HH** | `/hh` — только для админа: sync вакансий с HH.ru (запрос AQA/Python, он же без Python или свой), без LLM; кэш listings + skip detail |
 | **Вакансии** | Все уникальные вакансии из PostgreSQL: поиск, фильтры, пресеты, пагинация, сортировка по клику на заголовок; вкладка **Аналитика** |
 | **Резюме** | Список резюме пользователя: просмотр текста, создание (вставкой или из PDF/DOCX), редактирование, удаление; «Чего не хватает» по оценкам |
 | **Карта рынка** | `/map` — вакансии на плоскости по смыслу, ниши с ростом и зарплатой, место резюме |
@@ -913,7 +916,7 @@ Env: `JOBDESK_TOKEN` (обязателен), `JOBDESK_API_URL` (по умолч�
 | `GET` | `/vacancies/technologies` | Технологии по числу вакансий под фильтрами (без учёта собственного `technology`) — варианты фильтра |
 | `GET` `POST` | `/vacancies/reextract` | Переразбор LLM активных вакансий не из HH без специализации (admin): `GET` — сколько их, `POST` — 202 `{job_id}` (идёт — id текущей) |
 | `GET` | `/hh/status` | Статус HH sync (admin): токен задан?, TTL listings, счётчики кэша |
-| `POST` | `/hh/sync` | HH sync в фоне (admin): 202 `{job_id}`; 409, если sync уже идёт. Поиск → dedup → detail только для новых → БД |
+| `POST` | `/hh/sync` | HH sync в фоне (admin): 202 `{job_id}`; 409, если sync уже идёт. Тело: окно, `query` (`main` \| `no_python` \| `custom`) и `text` для `custom`. Поиск → dedup → detail только для новых → БД |
 | `GET` | `/hh/sync-jobs` \| `/hh/sync-jobs/{id}` | Последние sync / один sync (admin): статус, прогресс, итог (у `failed` — частичный) |
 | `GET` | `/hh/sync-jobs/{id}/events` | SSE статуса HH sync (admin; `?ticket=` или Bearer) |
 | `POST` | `/hh/sync-jobs/{id}/cancel` | Отмена HH sync (admin): `queued` → `cancelled` сразу, `running` — флаг; ответ — текущий sync |
@@ -999,9 +1002,10 @@ Query-параметры списка, метрик, аналитики и эк�
 и пометку об отмене; текст в поле не очищается.
 
 Вакансии с HH (`source_channel = "hh"`) появляются после admin-sync
-(`/hh` или `POST /hh/sync`). Sync — фоновая durable-джоба (`hh_sync_jobs`,
-lease и recover как у прогонов; в Docker — `hh-worker`, без Redis —
-`HH_SYNC_JOB_BACKEND=inprocess`): до ~2000 detail-запросов при 3 rps идут
+(`/hh` или `POST /hh/sync`). Sync выполняет HH-сервис (`jobdesk_hh`): ядро проверяет
+админа и `Idempotency-Key` и проксирует запрос, а сервис ведёт фоновую durable-джобу
+(`hh.hh_sync_jobs`, lease и recover как у прогонов; в Docker — `hh-worker`, без Redis —
+`HH_SYNC_JOB_BACKEND=inprocess` у сервиса) и пишет вакансии пачками через внутренний API ядра: до ~2000 detail-запросов при 3 rps идут
 10+ минут, внутри HTTP-запроса их обрывал бы прокси. Страница `/hh` показывает
 ход и итог последнего sync и после перезагрузки; идущий sync можно отменить
 кнопкой «Отменить» (`POST /hh/sync-jobs/{id}/cancel`) — итог до отмены сохраняется.
@@ -1017,6 +1021,10 @@ HH отдаёт не глубже 2000 вакансий на поиск: есл�
 Роли HH «Тестировщик» и «Программист, разработчик» пишутся в
 `detected_specializations` сразу как `QA` / `Software Engineer`.
 На вкладке `/hh` окно sync задаётся в интерфейсе: All, 7 / 14 / 30 дней или диапазон дат.
+Там же выбирается запрос: основной (`hh.search.text`), он же без Python
+(`hh.search.text_no_python`) или свой текст на языке запросов HH (до 1000 символов).
+Роли `hh.search.professional_role` применяются ко всем трём. Текст запроса сохраняется
+в sync: повтор после recover ищет то же самое, а итог показывает, по какому запросу шёл поиск.
 Кэш короткой выдачи (`hh_listings`) живёт `hh.listing_ttl_days` и не даёт
 повторно дергать detail для уже загруженных id.
 
@@ -1031,8 +1039,8 @@ HH отдаёт не глубже 2000 вакансий на поиск: есл�
 |---------|------------|
 | `parse_runs` | Журнал прогонов: статус, метрики, снимок конфигурации |
 | `vacancies` | Уникальные вакансии (`id` = content-hash или `sha256(hh:{id})` для HH), `archived_at` — TTL, `company_key` — нормализованное название компании |
-| `hh_listings` | Кэш короткой выдачи HH + `detail_fetched_at` (anti-DDOS detail) |
-| `hh_sync_jobs` | Фоновые HH sync: статус, lease, прогресс, итог, `cancel_requested` |
+| `hh.hh_listings` | Кэш короткой выдачи HH + `detail_fetched_at` (anti-DDOS detail); схема HH-сервиса |
+| `hh.hh_sync_jobs` | Фоновые HH sync: статус, lease, прогресс, итог, `cancel_requested`; схема HH-сервиса, `requested_by` без FK |
 | `exchange_rates` | Курсы ЦБ по датам |
 | `ai_extraction_cache` | Кэш ответов LLM при парсинге |
 | `saved_filters` | Пресеты фильтров (`user_id`) |
@@ -1071,23 +1079,23 @@ jobdesk/
   pyproject.toml
   config.yaml
   llm_models.yaml
-  docker-compose.yml       — postgres, redis, backend, parse-worker, llm-worker, hh-worker,
+  docker-compose.yml       — postgres, redis, backend, parse-worker, llm-worker, hh-service, hh-worker,
                              maintenance-worker, frontend, pg-backup; observability — profile `observability`
-  Dockerfile.backend
+  Dockerfile.backend       — цели backend (ядро) и hh (HH-сервис), общий слой зависимостей
   scripts/pg_backup.sh     — плановый pg_dump + проверка восстановления (сервис pg-backup)
   .github/workflows/ci.yml — CI, только ручной запуск (см. «Тесты» → CI)
 
-  backend/                 — FastAPI, SQLAlchemy, RunService, SSE
-    api/routes/            — health, auth, config, runs, vacancies, hh,
-                             analytics, filters, resumes, fx, ai-cache, llm-jobs
+  backend/                 — ядро: FastAPI, SQLAlchemy, RunService, SSE
+    api/routes/            — health, auth, config, runs, vacancies, hh (прокси в HH-сервис),
+                             internal (/internal/v1 для сервисов), analytics, filters,
+                             resumes, fx, ai-cache, llm-jobs
     db/                    — модели, Alembic, bounded repos (+ repository facade),
                              кэш LLM (DbAIExtractionCache), UPSERT
     services/              — run/match/cover_letter/llm_job/interactive_llm,
-                             llm_job_events, parse_run_events, auth, import, hh_sync(_job)
-    workers/               — parse/llm/hh_worker (RQ, общий runner), *_tasks, recover*,
-                             liveness (heartbeat + watchdog), healthcheck
-    queue/                 — RQ Redis connection (очереди parse, llm, hh)
-  alembic/                 — миграции SQL (001…047)
+                             llm_job_events, parse_run_events, auth, import, hh_service_client
+    workers/               — parse/llm_worker (RQ), *_tasks, recover*
+    queue/                 — RQ Redis connection (очереди parse, llm)
+  alembic/                 — миграции SQL ядра (001…054); схема hh — jobdesk_hh/migrations
 
   frontend/                — React UI (Vite)
     src/pages/             — Login, Dashboard, Run, Import, Hh, Vacancies, Resumes
@@ -1095,6 +1103,9 @@ jobdesk/
                              MetricsCharts, AnalyticsPanel
 
   jobdesk_mcp/             — MCP-сервер (stdio): клиент HTTP API с токеном доступа
+  jobdesk_platform/        — общая инфраструктура процессов: сессия БД, tracing, RQ-раннер,
+                             liveness, SSE, pub/sub, формат ошибок, сервисные токены и клиент
+  jobdesk_hh/              — HH-сервис: sync, кэш выдачи, джобы, API /v1, схема hh (migrations/)
 
   jobdesk/          — ядро парсинга (общее для API и CLI)
     parse_runner.py        — Telethon fetch, dedup, progress; ingest через ingestion/
@@ -1105,6 +1116,7 @@ jobdesk/
     extraction/            — rules helpers
     ai/                    — OpenRouter, cache port + registry, token cost
     hh/                    — клиент HH API, mapper → Vacancy
+    contracts/             — контракты HTTP ядро ↔ сервисы (внутренний API, API HH-сервиса)
     evals/                 — scorer + live runner golden extraction
     filters/, deduplication/, analytics/, exporters/
 
@@ -1198,6 +1210,7 @@ poetry run python -c "import telethon; print(telethon.__version__)"
   по `last_seen_at`); после purge detail снова запросится.
 - **`search.text` / `professional_role` / `per_page`** — параметры выдачи
   (дефолт — AQA/Python, роли 124 и 96).
+- **`search.text_no_python`** — второй запрос на вкладке HH (те же термины без Python).
 - **`max_rps`** — лимит запросов к API (по умолчанию 3).
 - **`db_flush_batch_size`** (по умолчанию 30) — промежуточный UPSERT+commit;
   буфер Vacancy в памяти очищается после каждого батча (меньше RAM, прогресс

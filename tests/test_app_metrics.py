@@ -251,7 +251,7 @@ def test_db_parse_runs_finished_24h_counts_recent(api_client):
 def test_db_jobs_lease_expired_counts_running_with_stale_lease(api_client):
     from tests.conftest import new_user
 
-    from backend.db.models import HhSyncJobRow, LlmJobRow, ParseRunRow
+    from backend.db.models import LlmJobRow, ParseRunRow
 
     now = datetime.now(UTC)
     factory = get_session_factory()
@@ -264,29 +264,15 @@ def test_db_jobs_lease_expired_counts_running_with_stale_lease(api_client):
         session.add(LlmJobRow(user_id=uid, kind="import", status="running", lease_until=now + timedelta(minutes=2)))
         # Не running — не считается, даже без lease.
         session.add(LlmJobRow(user_id=uid, kind="import", status="queued"))
-        session.add(HhSyncJobRow(status="completed", params={}))
         session.commit()
     finally:
         session.close()
 
     assert _sample("db_jobs_lease_expired", {"kind": "parse"}) == 1
     assert _sample("db_jobs_lease_expired", {"kind": "llm"}) == 1
-    # Серия с нулём есть: алерт не путает «нет зависших» с «нет метрики».
-    assert REGISTRY.get_sample_value("db_jobs_lease_expired", {"kind": "hh_sync"}) == 0
-
-
-def test_db_jobs_lease_expired_counts_running_without_lease(api_client):
-    from backend.db.models import HhSyncJobRow
-
-    factory = get_session_factory()
-    session = factory()
-    try:
-        session.add(HhSyncJobRow(status="running", params={}))
-        session.commit()
-    finally:
-        session.close()
-
-    assert _sample("db_jobs_lease_expired", {"kind": "hh_sync"}) == 1
+    # HH sync — серия HH-сервиса (tests/test_hh_metrics.py), ядро её не отдаёт.
+    assert REGISTRY.get_sample_value("db_jobs_lease_expired", {"kind": "hh_sync"}) is None
+    assert REGISTRY.get_sample_value("db_hh_listings", {"state": "total"}) is None
 
 
 def test_parse_run_duration_has_fine_buckets():
@@ -362,9 +348,8 @@ def _empty_db_stats():
         {},
         0,
         None,
-        {"total": 0, "with_detail": 0, "without_detail": 0},
         {},
-        {"parse": 0, "llm": 0, "hh_sync": 0},
+        {"parse": 0, "llm": 0},
     )
 
 
@@ -428,7 +413,7 @@ def test_worker_imports_do_not_register_db_stats_collector():
     import sys
 
     code = (
-        "import backend.workers.parse_worker, backend.workers.llm_worker, backend.workers.hh_worker\n"
+        "import backend.workers.parse_worker, backend.workers.llm_worker, jobdesk_hh.worker, jobdesk_hh.tasks\n"
         "import backend.workers.recover, backend.workers.recover_parse, backend.workers.parse_tasks\n"
         "import backend.workers.llm_tasks\n"
         "from prometheus_client import REGISTRY\n"
@@ -437,6 +422,7 @@ def test_worker_imports_do_not_register_db_stats_collector():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     assert "_DBPoolCollector" in out
     assert "_DBStatsCollector" not in out
+    assert "HhDbStatsCollector" not in out
 
 
 def test_register_db_stats_collector_is_idempotent():
@@ -492,8 +478,6 @@ def test_single_process_metrics_use_global_registry(monkeypatch):
 def test_labelled_counters_have_zero_series_before_first_event():
     """Первое событие после старта процесса видно в increase(): серия уже есть с нулём."""
     for name, labels in (
-        ("hh_syncs_total", {"outcome": "success"}),
-        ("hh_details_total", {"result": "fetched"}),
         ("auth_events_total", {"event": "login", "outcome": "success"}),
         ("vacancy_match_calls_total", {"outcome": "success"}),
         ("vacancy_import_items_total", {"status": "created"}),

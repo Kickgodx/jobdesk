@@ -1,4 +1,4 @@
-"""Поднять зависшие / потерянные из Redis ``hh_sync_jobs`` обратно в очередь."""
+"""Поднять зависшие / потерянные из Redis ``hh.hh_sync_jobs`` обратно в очередь."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from backend.db import hh_sync_job_repository as jobs
-from backend.db.session import session_scope
-from backend.services.hh_sync_events import publish_hh_sync_event
-from backend.settings import get_settings
-from backend.workers.recover_loop import rq_job_still_live
+from jobdesk_hh.db import jobs
+from jobdesk_hh.db.session import session_scope
+from jobdesk_hh.events import publish_hh_sync_event
+from jobdesk_hh.settings import get_hh_settings
+from jobdesk_platform.workers.recover_loop import rq_job_still_live
 
 _LOG = logging.getLogger(__name__)
 
@@ -19,12 +19,12 @@ def recover_stuck_hh_sync_jobs(*, requeue_all_queued: bool = False) -> int:
     """``running`` с истёкшим lease → ``queued`` (``failed`` по лимиту попыток, ``cancelled`` при запрошенной
     отмене); старые ``queued`` → в очередь.
 
-    ``requeue_all_queued`` — поднять и свежие ``queued`` (старт API в режиме inprocess:
+    ``requeue_all_queued`` — поднять и свежие ``queued`` (старт сервиса в режиме inprocess:
     потоков прошлого процесса уже нет). Возвращает число джоб, отправленных в очередь.
     """
-    from backend.services.hh_sync_job_service import enqueue_hh_sync_job
+    from jobdesk_hh.job_service import enqueue_hh_sync_job
 
-    settings = get_settings()
+    settings = get_hh_settings()
     rq_mode = settings.hh_sync_job_backend_normalized == "rq"
     now = datetime.now(UTC)
     stuck_queued_after = now - timedelta(minutes=max(1, settings.hh_sync_job_stuck_minutes))
@@ -58,7 +58,7 @@ def recover_stuck_hh_sync_jobs(*, requeue_all_queued: bool = False) -> int:
 
     redis_conn = None
     if rq_mode and to_requeue:
-        from backend.queue.rq_conn import get_redis_connection
+        from jobdesk_hh.queue import get_redis_connection
 
         redis_conn = get_redis_connection()
 

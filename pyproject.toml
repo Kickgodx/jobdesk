@@ -56,7 +56,8 @@ jobdesk = "jobdesk.cli.app:main"
 jobdesk-api = "backend.main:main"
 jobdesk-llm-worker = "backend.workers.llm_worker:main"
 jobdesk-parse-worker = "backend.workers.parse_worker:main"
-jobdesk-hh-worker = "backend.workers.hh_worker:main"
+jobdesk-hh-service = "jobdesk_hh.main:main"
+jobdesk-hh-worker = "jobdesk_hh.worker:main"
 jobdesk-maintenance-worker = "backend.workers.maintenance_worker:main"
 jobdesk-mcp = "jobdesk_mcp.__main__:main"
 
@@ -73,7 +74,7 @@ markers = [
 
 # Покрытие считается по запросу (`pytest --cov`), в addopts не включено — замедляет прогон.
 [tool.coverage.run]
-source = ["jobdesk", "backend", "jobdesk_mcp"]
+source = ["jobdesk", "backend", "jobdesk_mcp", "jobdesk_platform", "jobdesk_hh"]
 branch = true
 
 [tool.coverage.report]
@@ -116,11 +117,12 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["jobdesk", "backend"]
+known-first-party = ["jobdesk", "backend", "jobdesk_platform", "jobdesk_hh"]
 
 [tool.ruff.lint.per-file-ignores]
 # Исторические миграции не трогаем (UP/I ломают стабильность ревизий).
 "alembic/versions/*" = ["UP", "I", "RUF"]
+"jobdesk_hh/migrations/versions/*" = ["UP", "I", "RUF"]
 # Локальные отладочные скрипты вне пакета.
 "z*.py" = ["ALL"]
 

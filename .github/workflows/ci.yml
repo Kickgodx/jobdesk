@@ -24,7 +24,7 @@ on:
         type: boolean
         default: true
       docker:
-        description: "Docker: docker compose config и сборка образов backend / frontend (без push)"
+        description: "Docker: docker compose config и сборка образов backend / hh / frontend (без push)"
         type: boolean
         default: false
 
@@ -150,7 +150,13 @@ jobs:
           docker compose --profile observability config --quiet
 
       - name: Build backend image
-        run: docker build --file Dockerfile.backend --tag jobdesk-backend:ci .
+        run: docker build --file Dockerfile.backend --target backend --tag jobdesk-backend:ci .
+
+      # HH-сервис: своя цель образа, без кода ядра (граница пакетов держится и в образе).
+      - name: Build HH service image
+        run: |
+          docker build --file Dockerfile.backend --target hh --tag jobdesk-hh:ci .
+          docker run --rm jobdesk-hh:ci python -c "import importlib.util as u, jobdesk_hh.api, jobdesk_hh.worker; assert u.find_spec('backend') is None"
 
       - name: Build frontend image
         run: docker build --tag jobdesk-frontend:ci frontend

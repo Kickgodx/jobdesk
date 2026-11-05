@@ -199,11 +199,12 @@ Liveness RQ-воркеров (не yaml): `WORKER_HEARTBEAT_MAX_AGE_SECONDS` (п
 | Поле | Назначение |
 |------|------------|
 | **`enabled`** | Разрешить `POST /hh/sync` и вкладку `/hh`. |
-| **`listing_ttl_days`** | TTL кэша короткой выдачи `hh_listings` (по `last_seen_at`). `0` — не чистить. После purge detail снова запросится. |
+| **`listing_ttl_days`** | TTL кэша короткой выдачи `hh.hh_listings` (по `last_seen_at`; чистит HH-сервис после sync, при старте и раз в час). `0` — не чистить. После purge detail снова запросится. |
 | **`max_rps`** | Лимит RPS к HH API (retry на 429). |
 | **`db_flush_batch_size`** | Сколько вакансий копить перед UPSERT+commit (по умолчанию 30). Буфер в памяти очищается после каждого батча. |
 | **`api_base` / `host`** | Базовый URL API и query `host`. |
 | **`app_name` / `app_version`** | Часть `User-Agent` / `HH-User-Agent`. |
-| **`search.text`** | Текст поиска (дефолт — AQA/Python как в MVP hhparser). |
+| **`search.text`** | Основной запрос (`query: main`; дефолт — AQA/Python как в MVP hhparser). |
+| **`search.text_no_python`** | Второй запрос (`query: no_python`) — те же AQA-термины без слова Python. Третий вариант (`query: custom`) — свой текст из UI / тела `POST /hh/sync`, в конфиге не хранится. |
 | **`search.professional_role`** | Роли HH (124 = тестировщик, 96 = разработчик). Роли пишутся в `detected_specializations` сразу как `QA` / `Software Engineer`. |
 | **`search.per_page`** | Размер страницы (макс. 100). |

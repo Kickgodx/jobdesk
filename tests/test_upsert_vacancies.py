@@ -297,7 +297,7 @@ def test_repost_fills_missing_post_date(db_session):
 
 def test_hh_republished_vacancy_returns_from_archive(db_session):
     """HH поднял вакансию заново (published_at новее) — она возвращается из архива."""
-    from backend.db import hh_repository as hh_repo
+    from backend.db import vacancy_repository
     from jobdesk.config.schema import FxConfig
 
     now = datetime.now(UTC)
@@ -307,17 +307,17 @@ def test_hh_republished_vacancy_returns_from_archive(db_session):
         source_post_key="hh-555",
         post_date=now - timedelta(days=VACANCY_TTL_DAYS + 5),
     )
-    hh_repo.upsert_hh_vacancies(db_session, [first], fx_config=fx)
+    vacancy_repository.upsert_hh_vacancies(db_session, [first], fx_config=fx)
     assert archive_expired_vacancies(db_session) == 1
     db_session.commit()
 
     # Тот же published_at (вакансия просто снова попала в выдачу) — архив остаётся.
-    hh_repo.upsert_hh_vacancies(db_session, [first.model_copy()], fx_config=fx)
+    vacancy_repository.upsert_hh_vacancies(db_session, [first.model_copy()], fx_config=fx)
     db_session.commit()
     assert db_session.get(VacancyRow, first.id).archived_at is not None
 
     republished = first.model_copy(update={"post_date": now - timedelta(hours=3)})
-    stats = hh_repo.upsert_hh_vacancies(db_session, [republished], fx_config=fx)
+    stats = vacancy_repository.upsert_hh_vacancies(db_session, [republished], fx_config=fx)
     db_session.commit()
 
     assert stats.updated_existing == 1

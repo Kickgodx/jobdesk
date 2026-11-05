@@ -3,7 +3,8 @@
 Без неё растут: просроченный кэш LLM (уходил только при чтении того же ключа) и кэш
 от прежних версий промпта, старые курсы валют,
 завершённые LLM-джобы, ключи идемпотентности и журнал прогонов. Удаление — пачками
-в отдельных транзакциях, чтобы не держать длинные блокировки.
+в отдельных транзакциях, чтобы не держать длинные блокировки. Историю HH sync чистит
+HH-сервис (``jobdesk_hh.maintenance``).
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from sqlalchemy.orm import Session
 
 from backend.db import ai_cache_repository as ai_cache_repo
 from backend.db import fx_repository as fx_repo
-from backend.db import hh_sync_job_repository as hh_sync_repo
 from backend.db import idempotency_repository as idem_repo
 from backend.db import llm_job_repository as llm_repo
 from backend.db import parse_run_repository as run_repo
@@ -39,7 +39,6 @@ class CleanupStats:
     llm_jobs: int = 0
     idempotency_keys: int = 0
     parse_runs: int = 0
-    hh_sync_jobs: int = 0
     refresh_tokens: int = 0
     exchange_rates: int = 0
 
@@ -50,7 +49,6 @@ class CleanupStats:
             + self.llm_jobs
             + self.idempotency_keys
             + self.parse_runs
-            + self.hh_sync_jobs
             + self.refresh_tokens
             + self.exchange_rates
         )
@@ -95,9 +93,6 @@ def purge_service_tables(
     if retention.parse_runs_ttl_days > 0:
         runs_cutoff = now - timedelta(days=retention.parse_runs_ttl_days)
         steps.append(("parse_runs", lambda s, n: run_repo.purge_old_parse_runs(s, older_than=runs_cutoff, limit=n)))
-        steps.append(
-            ("hh_sync_jobs", lambda s, n: hh_sync_repo.purge_old_hh_sync_jobs(s, older_than=runs_cutoff, limit=n))
-        )
 
     if retention.exchange_rates_ttl_days > 0:
         fx_cutoff = now.date() - timedelta(days=max(retention.exchange_rates_ttl_days, fx_sync_days))

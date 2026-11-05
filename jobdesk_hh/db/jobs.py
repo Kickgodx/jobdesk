@@ -1,4 +1,4 @@
-"""Репозиторий фоновых HH sync (hh_sync_jobs): claim с lease, fencing, reclaim — как parse_runs."""
+"""Фоновые HH sync (``hh.hh_sync_jobs``): claim с lease, fencing, reclaim — как parse_runs."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
-from backend.db.models import HhSyncJobRow
-from backend.settings import get_settings
+from jobdesk_hh.db.models import HhSyncJobRow
+from jobdesk_hh.settings import get_hh_settings
 
 ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -21,7 +21,7 @@ def new_lease_owner() -> str:
 
 
 def _lease_deadline(now: datetime) -> datetime:
-    return now + timedelta(seconds=max(30, get_settings().hh_sync_job_lease_seconds))
+    return now + timedelta(seconds=max(30, get_hh_settings().hh_sync_job_lease_seconds))
 
 
 def create_hh_sync_job(session: Session, *, params: dict, requested_by: int | None) -> HhSyncJobRow:
@@ -217,7 +217,7 @@ def reclaim_expired_hh_sync_job(session: Session, job_id: uuid.UUID, *, now: dat
     if row.cancel_requested:
         outcome = "cancelled"
         values = {**base, "status": "cancelled", "finished_at": now}
-    elif attempts >= max(1, get_settings().hh_sync_job_max_attempts):
+    elif attempts >= max(1, get_hh_settings().hh_sync_job_max_attempts):
         outcome = "failed"
         values = {**base, "status": "failed", "finished_at": now, "error_message": attempts_exhausted_message(attempts)}
     else:

@@ -28,6 +28,20 @@ tests:
               summary: "Задача parse в running с истёкшим lease"
               description: "Recover не возвращает её в очередь больше 5 минут. Проверьте воркер и логи recover."
 
+  - name: lease HH sync истёк — серия HH-сервиса
+    interval: 1m
+    input_series:
+      - series: 'db_jobs_lease_expired{job="jobdesk-hh-service", instance="10.0.0.8:9105", kind="hh_sync"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: JobLeaseExpired
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: hh_sync}
+            exp_annotations:
+              summary: "Задача hh_sync в running с истёкшим lease"
+              description: "Recover не возвращает её в очередь больше 5 минут. Проверьте воркер и логи recover."
+
   - name: recover вернул задачу через минуту
     interval: 1m
     input_series:
@@ -233,6 +247,8 @@ tests:
         values: '0x10'
       - series: 'up{job="jobdesk-llm-worker", instance="10.0.0.4:9101", dns_name="llm-worker"}'
         values: '1x10'
+      - series: 'up{job="jobdesk-hh-service", instance="10.0.0.8:9105", dns_name="hh-service"}'
+        values: '1x10'
       - series: 'up{job="jobdesk-hh-worker", instance="10.0.0.6:9103", dns_name="hh-worker"}'
         values: '1x10'
       - series: 'up{job="jobdesk-maintenance-worker", instance="10.0.0.7:9104", dns_name="maintenance-worker"}'
@@ -264,6 +280,8 @@ tests:
       - series: 'up{job="jobdesk-llm-worker", instance="10.0.0.4:9101", dns_name="llm-worker"}'
         values: '1x10'
       - series: 'up{job="jobdesk-parse-worker", instance="10.0.0.5:9102", dns_name="parse-worker"}'
+        values: '1x10'
+      - series: 'up{job="jobdesk-hh-service", instance="10.0.0.8:9105", dns_name="hh-service"}'
         values: '1x10'
       - series: 'up{job="jobdesk-hh-worker", instance="10.0.0.6:9103", dns_name="hh-worker"}'
         values: '1x10'

@@ -63,6 +63,18 @@ x-worker-healthcheck: &worker-healthcheck
   retries: 4
   start_period: 30s
 
+# HH-сервис (jobdesk_hh): образ из цели hh — без кода ядра. Данные — схема hh той же базы,
+# вакансии — через внутренний API ядра (CORE_INTERNAL_URL). depends_on на backend нет
+# намеренно: каждая сторона переживает недоступность другой (sync тогда failed, а
+# /api/v1/hh/* — 503 UPSTREAM_UNAVAILABLE). Миграции схемы hh сервис применяет сам.
+x-hh-common: &hh-common
+  <<: *app-common
+  build:
+    context: .
+    dockerfile: Dockerfile.backend
+    target: hh
+  depends_on: *infra-ready
+
 services:
   postgres:
     # postgres:16-alpine + pgvector (docker/postgres/Dockerfile): эмбеддинги вакансий и резюме.
@@ -161,7 +173,8 @@ services:
       OTEL_SERVICE_NAME: jobdesk-backend
       LLM_JOB_BACKEND: rq
       PARSE_JOB_BACKEND: rq
-      HH_SYNC_JOB_BACKEND: rq
+      # /api/v1/hh/* проксируются в HH-сервис (Docker-сеть, на хост не публикуется).
+      HH_SERVICE_URL: http://hh-service:8100
       # Индексация эмбеддингов, оценки зарплат, обзор и карта рынка — в maintenance-worker.
       MAINTENANCE_BACKEND: worker
     volumes:
@@ -223,24 +236,52 @@ services:
       <<: *worker-healthcheck
       test: ["CMD", "python", "-m", "backend.workers.healthcheck", "--port", "9102"]
 
+  # HH-сервис: API для ядра (/v1/*, токен HH_SERVICE_TOKEN) и /health; порт только в Docker-сети.
+  # Метрики :9105 (db_hh_listings, db_jobs_lease_expired{kind="hh_sync"}) — Prometheus dns_sd.
+  hh-service:
+    <<: *hh-common
+    environment:
+      <<: *app-env
+      HH_SERVICE_HOST: 0.0.0.0
+      HH_SERVICE_PORT: "8100"
+      HH_SERVICE_METRICS_PORT: "9105"
+      HH_SYNC_JOB_BACKEND: rq
+      CORE_INTERNAL_URL: http://backend:8000
+      OTEL_SERVICE_NAME: jobdesk-hh-service
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    # /health отвечает 200 и при недоступной БД (status=degraded) — смотрим на поле.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json, sys, urllib.request
+          body = json.load(urllib.request.urlopen("http://127.0.0.1:8100/health", timeout=4))
+          sys.exit(0 if body.get("status") == "ok" else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
   # HH sync (POST /hh/sync → 202): до ~2000 detail-запросов при 3 rps, 10+ минут.
   # Своя очередь hh — sync не ждёт многочасовой прогон в очереди parse.
   # Метрики :9103 в Docker-сети (Prometheus dns_sd).
   hh-worker:
-    <<: *app-common
+    <<: *hh-common
     command: ["jobdesk-hh-worker"]
-    depends_on: *worker-depends-on
     environment:
       <<: *app-env
       HH_SYNC_JOB_BACKEND: rq
       HH_WORKER_METRICS_PORT: "9103"
+      CORE_INTERNAL_URL: http://backend:8000
       OTEL_SERVICE_NAME: jobdesk-hh-worker
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ./llm_models.yaml:/app/llm_models.yaml:ro
     healthcheck:
       <<: *worker-healthcheck
-      test: ["CMD", "python", "-m", "backend.workers.healthcheck", "--port", "9103"]
+      test: ["CMD", "python", "-m", "jobdesk_platform.workers.healthcheck", "--port", "9103"]
 
   # Обслуживание каталога (backend/maintenance.py): индексация эмбеддингов, оценки зарплат,
   # обзор рынка (LLM) и карта рынка (t-SNE) — вне процессов API, чтобы не отнимать у запросов
