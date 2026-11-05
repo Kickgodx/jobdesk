@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,6 +36,7 @@ hh:
   listing_ttl_days: 40
   search:
     text: "Python AND AQA"
+    text_no_python: "AQA OR SDET"
     professional_role: ["124", "96"]
     per_page: 100
 """,
@@ -97,6 +99,8 @@ def test_hh_status_requires_admin(client: TestClient):
     body = r.json()
     assert body["enabled"] is True
     assert body["token_configured"] is False
+    assert body["search_text"] == "Python AND AQA"
+    assert body["search_text_no_python"] == "AQA OR SDET"
 
 
 def test_hh_sync_503_without_token(client: TestClient):
@@ -528,3 +532,52 @@ def test_hh_sync_result_carries_depth_warning(client: TestClient, monkeypatch):
     assert job["status"] == "completed", job
     assert len(job["result"]["warnings"]) == 1
     assert "5000" in job["result"]["warnings"][0]
+
+
+class _CapturingClient(_EmptyClient):
+    texts: ClassVar[list[str]] = []
+
+    def iter_vacancy_pages(self, params):
+        _CapturingClient.texts.append(params.text)
+        return iter([])
+
+
+@pytest.mark.parametrize(
+    ("body", "query", "text"),
+    [
+        ({}, "main", "Python AND AQA"),
+        ({"query": "no_python"}, "no_python", "AQA OR SDET"),
+        ({"query": "custom", "text": "  Go AND backend  "}, "custom", "Go AND backend"),
+    ],
+)
+def test_hh_sync_searches_by_chosen_query(client: TestClient, monkeypatch, body, query, text):
+    _CapturingClient.texts = []
+    _configure_hh(monkeypatch, _CapturingClient)
+    admin = _register(client, f"admin-q-{query}@example.com")
+
+    job = _sync(client, admin, json={"window": "7d", **body})
+
+    assert job["status"] == "completed", job
+    assert _CapturingClient.texts == [text]
+    assert (job["query"], job["search_text"]) == (query, text)
+    assert (job["result"]["query"], job["result"]["search_text"]) == (query, text)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"query": "custom"},
+        {"query": "custom", "text": "   "},
+        {"query": "custom", "text": "x" * 1001},
+        {"query": "main", "text": "Go"},
+        {"query": "java"},
+    ],
+)
+def test_hh_sync_invalid_query_is_422(client: TestClient, monkeypatch, body):
+    _configure_hh(monkeypatch, _EmptyClient)
+    admin = _register(client, "admin-q-bad@example.com")
+
+    r = client.post("/api/v1/hh/sync", headers=_auth(admin), json=body)
+
+    assert r.status_code == 422, r.text
+    assert client.get("/api/v1/hh/sync-jobs", headers=_auth(admin)).json() == []

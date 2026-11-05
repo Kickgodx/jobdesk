@@ -1,7 +1,35 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { HhSyncJob, HhSyncProgress, HhSyncWindow } from "../types/api";
+import type {
+  HhSearchQuery,
+  HhStatus,
+  HhSyncJob,
+  HhSyncProgress,
+  HhSyncWindow,
+} from "../types/api";
+
+const QUERY_OPTIONS: { value: HhSearchQuery; label: string }[] = [
+  { value: "main", label: "Основной" },
+  { value: "no_python", label: "Без Python" },
+  { value: "custom", label: "Свой запрос" },
+];
+
+const QUERY_LABEL: Record<HhSearchQuery, string> = {
+  main: "основной",
+  no_python: "без Python",
+  custom: "свой",
+};
+
+// Совпадает с CUSTOM_TEXT_MAX_LENGTH в jobdesk_hh/query.py.
+const CUSTOM_TEXT_MAX = 1000;
+
+function presetText(status: HhStatus | undefined, query: HhSearchQuery): string | null {
+  if (!status) return null;
+  if (query === "main") return status.search_text;
+  if (query === "no_python") return status.search_text_no_python;
+  return null;
+}
 
 const WINDOW_OPTIONS: { value: HhSyncWindow; label: string }[] = [
   { value: "all", label: "Все" },
@@ -34,6 +62,8 @@ export default function HhPage() {
   const [syncWindow, setSyncWindow] = useState<HhSyncWindow>("7d");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [searchQuery, setSearchQuery] = useState<HhSearchQuery>("main");
+  const [customText, setCustomText] = useState("");
 
   const statusQ = useQuery({
     queryKey: ["hh-status"],
@@ -69,11 +99,12 @@ export default function HhPage() {
 
   const syncM = useMutation({
     mutationFn: async () => {
-      const accepted = await api.hhSync(
-        syncWindow === "range"
-          ? { window: syncWindow, date_from: dateFrom, date_to: dateTo }
-          : { window: syncWindow },
-      );
+      const accepted = await api.hhSync({
+        window: syncWindow,
+        ...(syncWindow === "range" ? { date_from: dateFrom, date_to: dateTo } : {}),
+        query: searchQuery,
+        ...(searchQuery === "custom" ? { text: customText.trim() } : {}),
+      });
       return api.hhSyncJob(accepted.job_id);
     },
     onSuccess: (created) => setLiveJob(created),
@@ -89,17 +120,22 @@ export default function HhPage() {
   const progress = isActive(job) ? (job?.progress ?? null) : null;
   const rangeInvalid =
     syncWindow === "range" && (!dateFrom || !dateTo || dateFrom > dateTo);
+  const customInvalid = searchQuery === "custom" && !customText.trim();
   const canRun =
     Boolean(status?.enabled && status.token_configured && status.email_configured) &&
     !syncM.isPending &&
     !isActive(job) &&
-    !rangeInvalid;
+    !rangeInvalid &&
+    !customInvalid;
+  const jobQuery = job?.query ?? "main";
+  const jobSearchText = job?.search_text ?? null;
 
   return (
     <div className="card">
       <h2>Парсинг HH.ru</h2>
       <p className="caption">
-        Поиск AQA/Python через официальный API. Деталки запрашиваются только для новых id
+        Поиск через официальный API: основной запрос, он же без Python или свой текст на языке
+        запросов HH. Деталки запрашиваются только для новых id
         (кэш listings с TTL). Без LLM — поля маппятся напрямую.
       </p>
 
@@ -133,14 +169,51 @@ export default function HhPage() {
             </dd>
           </div>
           <div>
-            <dt>Поиск</dt>
-            <dd>
-              <code className="wrap">{status.search_text}</code>
-              <br />
-              roles: {status.professional_role.join(", ")}
-            </dd>
+            <dt>Роли HH</dt>
+            <dd>{status.professional_role.join(", ")}</dd>
           </div>
         </dl>
+      )}
+
+      <p className="field-label" style={{ marginTop: "1rem" }}>
+        Запрос
+      </p>
+      <div className="row" style={{ gap: "1rem", flexWrap: "wrap" }}>
+        {QUERY_OPTIONS.map((opt) => (
+          <label key={opt.value} className="checkbox-row">
+            <input
+              type="radio"
+              name="hh-sync-query"
+              value={opt.value}
+              checked={searchQuery === opt.value}
+              onChange={() => setSearchQuery(opt.value)}
+            />
+            {opt.label}
+          </label>
+        ))}
+      </div>
+      {searchQuery === "custom" ? (
+        <label className="field" style={{ marginTop: "0.75rem" }}>
+          Текст запроса (язык запросов HH: AND, OR, NOT, кавычки, *)
+          <textarea
+            rows={3}
+            maxLength={CUSTOM_TEXT_MAX}
+            value={customText}
+            placeholder='Go AND (backend OR "бэкенд")'
+            onChange={(e) => setCustomText(e.target.value)}
+          />
+        </label>
+      ) : (
+        presetText(status, searchQuery) && (
+          <p style={{ marginTop: "0.5rem" }}>
+            <code className="wrap">{presetText(status, searchQuery)}</code>
+          </p>
+        )
+      )}
+      {customInvalid && (
+        <p className="muted" style={{ marginTop: "0.5rem" }}>
+          Введите текст запроса.
+        </p>
       )}
 
       <p className="field-label" style={{ marginTop: "1rem" }}>
@@ -229,6 +302,15 @@ export default function HhPage() {
             Последний sync: <strong>{STATUS_LABEL[job.status]}</strong>
             {job.created_at ? ` · запущен ${new Date(job.created_at).toLocaleString()}` : ""}
             {job.attempts > 1 ? ` · попытка ${job.attempts}` : ""}
+          </p>
+          <p className="muted">
+            Запрос: {QUERY_LABEL[jobQuery] ?? jobQuery}
+            {jobSearchText ? (
+              <>
+                {" — "}
+                <code className="wrap">{jobSearchText}</code>
+              </>
+            ) : null}
           </p>
           {progress && (
             <p className="muted">

@@ -29,6 +29,9 @@ class HhSyncRequest(BaseModel):
     window: str | None = None
     date_from: str | None = None
     date_to: str | None = None
+    # main | no_python — запросы из ``hh.search``; custom — свой текст в ``text``.
+    query: str | None = None
+    text: str | None = None
 
 
 class HhSyncResponse(BaseModel):
@@ -52,6 +55,9 @@ class HhSyncResponse(BaseModel):
     period: int | None = None
     date_from: str | None = None
     date_to: str | None = None
+    query: str = "main"
+    # Текст запроса к HH; None — у итогов, сохранённых до появления поля.
+    search_text: str | None = None
 
 
 class HhSyncProgress(BaseModel):
@@ -81,6 +87,8 @@ class HhSyncJobOut(BaseModel):
     period: int | None = None
     date_from: str | None = None
     date_to: str | None = None
+    query: str = "main"
+    search_text: str | None = None
     progress: HhSyncProgress | None = None
     result: HhSyncResponse | None = None
     error_message: str | None = None
@@ -98,6 +106,7 @@ class HhStatusResponse(BaseModel):
     email_configured: bool
     listing_ttl_days: int
     search_text: str
+    search_text_no_python: str
     professional_role: list[str]
     listings_total: int
     listings_with_detail: int

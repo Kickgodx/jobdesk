@@ -143,6 +143,33 @@ def test_job_records_result_and_progress(db, monkeypatch):
     assert seen["window"].period == 7
 
 
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        ({"window": "all", "query": "custom", "text": "Go AND backend"}, ("custom", "Go AND backend")),
+        # Джоба до появления выбора запроса: основной текст из конфига.
+        ({"window": "all"}, ("main", None)),
+    ],
+)
+def test_job_passes_saved_search_query(db, monkeypatch, params, expected):
+    with session_scope() as session:
+        job_id = jobs.create_hh_sync_job(session, params=params, requested_by=None).id
+    seen = {}
+
+    def fake_sync(session, *, config, search_query, **_kwargs):
+        seen["query"] = search_query
+        seen["main_text"] = config.hh.search.text
+        return hh_sync_tasks.HhSyncResult()
+
+    monkeypatch.setattr(hh_sync_tasks, "run_hh_sync", fake_sync)
+
+    hh_sync_tasks.run_hh_sync_job(str(job_id))
+
+    query, text = expected
+    assert seen["query"].query == query
+    assert seen["query"].text == (text or seen["main_text"])
+
+
 def test_unexpected_error_fails_job_with_short_message(db, monkeypatch):
     with session_scope() as session:
         job_id = jobs.create_hh_sync_job(session, params={"window": "all"}, requested_by=None).id

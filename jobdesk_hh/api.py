@@ -35,6 +35,7 @@ from jobdesk_hh.db import jobs, listings
 from jobdesk_hh.db.models import HhSyncJobRow
 from jobdesk_hh.db.session import session_scope
 from jobdesk_hh.events import channel_for
+from jobdesk_hh.query import HhSearchQueryError, resolve_hh_search_query
 from jobdesk_hh.settings import get_hh_settings
 from jobdesk_hh.sync import HhSyncNotConfigured, ensure_hh_ready
 from jobdesk_hh.window import HhSyncWindowError, resolve_hh_search_window
@@ -77,6 +78,8 @@ def job_to_out(row: HhSyncJobRow) -> HhSyncJobOut:
         period=params.get("period"),
         date_from=params.get("date_from"),
         date_to=params.get("date_to"),
+        query=params.get("query") or "main",
+        search_text=params.get("text"),
         progress=HhSyncProgress.model_validate(row.progress) if row.progress else None,
         result=HhSyncResponse.model_validate(row.result) if row.result else None,
         error_message=row.error_message,
@@ -192,6 +195,7 @@ def hh_status() -> HhStatusResponse:
         email_configured=bool((settings.hh_contact_email or "").strip()),
         listing_ttl_days=cfg.hh.listing_ttl_days,
         search_text=cfg.hh.search.text,
+        search_text_no_python=cfg.hh.search.text_no_python,
         professional_role=list(cfg.hh.search.professional_role),
         listings_total=counts.total,
         listings_with_detail=counts.with_detail,
@@ -213,11 +217,15 @@ def hh_sync(
     settings = get_hh_settings()
     cfg = load_config(settings.config_path)
     try:
+        query = resolve_hh_search_query(cfg.hh.search, query=body.query, text=body.text)
+    except HhSearchQueryError as exc:
+        raise http_error(422, CODE_VALIDATION, str(exc)) from exc
+    try:
         ensure_hh_ready(settings, cfg.hh)
     except HhSyncNotConfigured as exc:
         raise http_error(503, CODE_UPSTREAM_UNAVAILABLE, str(exc), retryable=True) from exc
 
-    job_id = job_service.start_hh_sync_job(resolved, requested_by=user_id)
+    job_id = job_service.start_hh_sync_job(resolved, query, requested_by=user_id)
     return HhSyncAccepted(job_id=job_id, status="queued")
 
 

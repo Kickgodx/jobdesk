@@ -17,6 +17,7 @@ from jobdesk_hh import core_client as core_client_module
 from jobdesk_hh.db import jobs
 from jobdesk_hh.db.session import session_scope
 from jobdesk_hh.events import publish_hh_sync_event
+from jobdesk_hh.query import ResolvedHhSearchQuery
 from jobdesk_hh.settings import get_hh_settings
 from jobdesk_hh.sync import HhSyncConflict, HhSyncResult, run_hh_sync
 from jobdesk_hh.window import ResolvedHhSearchWindow
@@ -95,7 +96,13 @@ def _run_traced(job_id: uuid.UUID, span) -> None:
         params = dict(claimed.params or {})
         attempt = claimed.attempts
     publish_hh_sync_event(job_id, status="running")
-    _LOG.info("HH sync %s: старт (попытка %s, окно %s)", job_id, attempt, params.get("window"))
+    _LOG.info(
+        "HH sync %s: старт (попытка %s, окно %s, запрос %s)",
+        job_id,
+        attempt,
+        params.get("window"),
+        params.get("query") or "main",
+    )
 
     stop_lease = threading.Event()
     lease_lost = threading.Event()
@@ -175,6 +182,11 @@ def _run_traced(job_id: uuid.UUID, span) -> None:
         )
         settings = get_hh_settings()
         config = load_config(settings.config_path)
+        # Текст сохранён при постановке; у джоб без него — основной запрос из конфига.
+        query = ResolvedHhSearchQuery(
+            query=params.get("query") or "main",
+            text=params.get("text") or config.hh.search.text,
+        )
         core = core_client_module.core_client()
         try:
             with session_scope() as session:
@@ -184,6 +196,7 @@ def _run_traced(job_id: uuid.UUID, span) -> None:
                     settings=settings,
                     core=core,
                     search_window=window,
+                    search_query=query,
                     progress_callback=on_progress,
                     should_stop=should_stop,
                 )

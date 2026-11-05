@@ -37,6 +37,7 @@ from jobdesk_hh.observability import (
     record_hh_details,
     record_hh_sync_finished,
 )
+from jobdesk_hh.query import ResolvedHhSearchQuery
 from jobdesk_hh.settings import HhSettings
 from jobdesk_hh.window import ResolvedHhSearchWindow
 
@@ -79,6 +80,8 @@ class HhSyncResult:
     period: int | None = None
     date_from: str | None = None
     date_to: str | None = None
+    query: str = "main"
+    search_text: str | None = None
 
 
 @dataclass
@@ -145,6 +148,7 @@ def run_hh_sync(
     settings: HhSettings,
     core: CoreClient,
     search_window: ResolvedHhSearchWindow | None = None,
+    search_query: ResolvedHhSearchQuery | None = None,
     progress_callback: HhSyncProgressCallback | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> HhSyncResult:
@@ -168,6 +172,9 @@ def run_hh_sync(
     result.period = resolved.period
     result.date_from = resolved.date_from
     result.date_to = resolved.date_to
+    query = search_query or ResolvedHhSearchQuery(query="main", text=config.hh.search.text)
+    result.query = query.query
+    result.search_text = query.text
 
     def report(phase: str, done: int = 0, total: int = 0) -> None:
         if progress_callback is not None:
@@ -183,6 +190,7 @@ def run_hh_sync(
             try:
                 report("search")
                 span.set_attribute("hh.window", resolved.window)
+                span.set_attribute("hh.query", query.query)
                 if resolved.period is not None:
                     span.set_attribute("hh.period", resolved.period)
                 if resolved.date_from:
@@ -190,7 +198,12 @@ def run_hh_sync(
                 if resolved.date_to:
                     span.set_attribute("hh.date_to", resolved.date_to)
                 shorts, pages, stopped = _collect_shorts(
-                    client, hh, resolved, should_stop=stop_requested, warnings=result.warnings
+                    client,
+                    hh,
+                    resolved,
+                    text=query.text,
+                    should_stop=stop_requested,
+                    warnings=result.warnings,
                 )
                 result.pages = pages
                 result.searched = len(shorts)
@@ -314,10 +327,11 @@ def run_hh_sync(
         )
         record_hh_details(fetched=result.details_fetched, skipped=result.details_skipped)
         _LOG.info(
-            "HH sync done in %.1fs: window=%s period=%s date_from=%s date_to=%s "
+            "HH sync done in %.1fs: query=%s window=%s period=%s date_from=%s date_to=%s "
             "searched=%s unique=%s dup=%s detail_fetch=%s skip=%s vac +%s/~%s "
             "batches=%s errors=%s",
             result.duration_seconds,
+            result.query,
             result.window,
             result.period,
             result.date_from,
@@ -340,6 +354,7 @@ def _collect_shorts(
     hh: HhConfig,
     search_window: ResolvedHhSearchWindow | None = None,
     *,
+    text: str | None = None,
     should_stop: Callable[[], bool] | None = None,
     warnings: list[str] | None = None,
 ) -> tuple[list[VacancyShort], int, bool]:
@@ -350,7 +365,7 @@ def _collect_shorts(
     """
     resolved = search_window or ResolvedHhSearchWindow(window="all")
     params = VacancySearchParams(
-        text=hh.search.text,
+        text=text or hh.search.text,
         professional_role=list(hh.search.professional_role),
         per_page=hh.search.per_page,
         period=resolved.period,
